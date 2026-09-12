@@ -314,14 +314,12 @@ def find_smart_match(source_name, target_options, target_clean_dict, saved_histo
     if not src_clean:
         return "(매칭 제외)", "미매칭"
         
-    # 순수 일치
     for raw_target, clean_target in target_clean_dict.items():
         if is_aggregate_account(raw_target):
             continue
         if src_clean == clean_target:
             return raw_target, "🎯 순수일치"
 
-    # 정밀 부분 포함
     if len(src_clean) >= 3:
         for raw_target, clean_target in target_clean_dict.items():
             if is_aggregate_account(raw_target):
@@ -330,7 +328,6 @@ def find_smart_match(source_name, target_options, target_clean_dict, saved_histo
                 if src_clean in clean_target or clean_target in src_clean:
                     return raw_target, "🔍 정밀포함"
 
-    # 엄격 유사도
     valid_targets = [raw for raw in target_options if raw != "(매칭 제외)" and not is_aggregate_account(raw)]
     valid_clean_map = {target_clean_dict[raw]: raw for raw in valid_targets if target_clean_dict.get(raw)}
     
@@ -341,13 +338,27 @@ def find_smart_match(source_name, target_options, target_clean_dict, saved_histo
     return "(매칭 제외)", "미매칭"
 
 # ==========================================
-# 4. 스마트 공식 총계 추출 함수 (중복 합산 방지)
+# 4. 스마트 공식 총계 추출 및 후보 탐색 함수
 # ==========================================
-def extract_smart_grand_total(df, name_col, amt_col):
+def find_total_candidates(df, name_col, amt_col):
+    """시트 내에서 총계 후보가 될 수 있는 행 목록을 추출"""
+    if df is None or df.empty or name_col not in df.columns or amt_col not in df.columns:
+        return []
+    temp = df.dropna(subset=[name_col]).copy()
+    temp[name_col] = temp[name_col].astype(str).str.strip()
+    temp['__amt_clean'] = temp[amt_col].apply(clean_number)
+    
+    pats = [r'자금수입총계', r'자금지출총계', r'수입총계', r'지출총계', r'총\s*계', r'합\s*계', r'수입합계', r'지출합계']
+    mask = temp[name_col].str.contains('|'.join(pats), regex=True, na=False)
+    candidates = temp[mask & (temp['__amt_clean'] > 0)]
+    return list(candidates[name_col].unique())
+
+def extract_smart_grand_total(df, name_col, amt_col, target_total_type="수입", forced_row=None):
     """
-    엑셀 시트에서 '자금수입총계', '자금지출총계', '총계' 등 공식 총계 행을 지능적으로 탐색.
-    발견 시 해당 행의 금액과 행 이름을 반환하고,
-    총계 행이 없으면 소계/합계를 제외한 순수 세부 계정의 합계를 산출.
+    공식 총계 산출 로직:
+    1. 사용자가 특정 행을 지정한 경우 해당 행 금액 반환
+    2. 재단 양식의 총계 유형(수입 또는 지출)에 맞는 학교 총계 행 탐색
+    3. 세부 계정만 합산할 경우 수입(5xxx) 또는 지출(4xxx) 계정 범위만 발라내어 합산
     """
     if df is None or df.empty or name_col not in df.columns or amt_col not in df.columns:
         return 0.0, "데이터 없음"
@@ -356,23 +367,42 @@ def extract_smart_grand_total(df, name_col, amt_col):
     temp[name_col] = temp[name_col].astype(str).str.strip()
     temp['__amt_clean'] = temp[amt_col].apply(clean_number)
     
-    # 1순위: '자금수입총계', '자금지출총계', '수입총계', '지출총계' 등 명확한 총계 행 탐색
-    primary_patterns = [r'자금수입총계', r'자금지출총계', r'수입총계', r'지출총계', r'총\s*계', r'합\s*계']
-    for pat in primary_patterns:
-        matched = temp[temp[name_col].str.contains(pat, regex=True, na=False)]
+    # 1. 사용자 강제 지정 행 우선
+    if forced_row and forced_row != "(자동 감지)":
+        matched = temp[temp[name_col] == forced_row]
         if not matched.empty:
-            # 0이 아닌 유효 금액을 가진 마지막 총계 행 선택
-            valid_rows = matched[matched['__amt_clean'] > 0]
-            if not valid_rows.empty:
-                chosen = valid_rows.iloc[-1]
-                return float(chosen['__amt_clean']), chosen[name_col]
-            else:
-                chosen = matched.iloc[-1]
-                return float(chosen['__amt_clean']), chosen[name_col]
+            return float(matched.iloc[-1]['__amt_clean']), forced_row
 
-    # 2순위: 총계 행이 따로 명시되지 않은 경우, 소계/합계를 제외한 순수 세부 계정만의 합산
+    # 2. 키워드별 우선순위 정밀 탐색
+    if "수입" in target_total_type:
+        patterns = [r'자금수입총계', r'자금수입\s*총계', r'수입총계', r'수입\s*총계', r'수입합계', r'총\s*계']
+    elif "지출" in target_total_type:
+        patterns = [r'자금지출총계', r'자금지출\s*총계', r'지출총계', r'지출\s*총계', r'지출합계', r'총\s*계']
+    else:
+        patterns = [r'자금수입총계', r'자금지출총계', r'수입총계', r'지출총계', r'총\s*계']
+        
+    for pat in patterns:
+        matched = temp[temp[name_col].str.contains(pat, regex=True, na=False)]
+        valid_rows = matched[matched['__amt_clean'] > 0]
+        if not valid_rows.empty:
+            chosen = valid_rows.iloc[-1]
+            return float(chosen['__amt_clean']), chosen[name_col]
+
+    # 3. 총계 행이 없는 경우: 수입/지출 계정코드(5천번대/4천번대)만 똑똑하게 순합계 산출
     exclude_pattern = '|'.join(EXCLUDE_KEYWORDS)
     pure_details = temp[~temp[name_col].str.contains(exclude_pattern, regex=True, na=False)]
+    
+    # 계정코드 5천번대(수입) 필터링 시도
+    if "수입" in target_total_type:
+        s_income = pure_details[pure_details[name_col].str.contains(r'^(5\d{3}|수입)', regex=True, na=False)]
+        if not s_income.empty and s_income['__amt_clean'].sum() > 0:
+            return float(s_income['__amt_clean'].sum()), "수입계정(5천번대) 순합계"
+    elif "지출" in target_total_type:
+        s_expense = pure_details[pure_details[name_col].str.contains(r'^(4\d{3}|지출)', regex=True, na=False)]
+        if not s_expense.empty and s_expense['__amt_clean'].sum() > 0:
+            return float(s_expense['__amt_clean'].sum()), "지출계정(4천번대) 순합계"
+
+    # 일반 순합계
     pure_sum = pure_details['__amt_clean'].sum()
     return float(pure_sum), "세부계정 순합계"
 
@@ -493,9 +523,9 @@ if source_df is None or target_df is None:
     st.stop()
 
 # ----------------------------------------------------
-# 2단계: 대조 열(과목명 및 금액) 설정
+# 2단계: 대조 열 설정 및 총계 행 정밀 지정
 # ----------------------------------------------------
-with st.expander("⚙️ 2단계: 대조 열(과목명 및 금액) 설정", expanded=False):
+with st.expander("⚙️ 2단계: 대조 열 및 총계 행 설정 (정밀 보정)", expanded=False):
     col_c1, col_c2 = st.columns(2)
     source_cols = list(source_df.columns)
     target_cols = list(target_df.columns)
@@ -510,6 +540,15 @@ with st.expander("⚙️ 2단계: 대조 열(과목명 및 금액) 설정", expa
     with ac2:
         t_amt = st.selectbox(f"비교할 금액 열 ({right_label_input})", target_cols, index=min(2, len(target_cols)-1))
 
+    # 학교 양식 총계 후보 행 직접 선택 옵션
+    s_total_candidates = ["(자동 감지)"] + find_total_candidates(source_df, s_name_col, s_amt)
+    forced_s_total_row = st.selectbox(
+        f"🏫 {left_label_input} 총계 행 직접 지정 (시트 내 수입총계/합계 행 선택)",
+        s_total_candidates,
+        index=0,
+        help="자동 감지가 시트 전체를 더해버릴 경우, 엑셀에 적혀 있는 '자금수입총계' 등 실제 총계 행을 직접 골라주세요."
+    )
+
 # ----------------------------------------------------
 # 3단계: 정밀 총계 산출 및 데이터 매칭
 # ----------------------------------------------------
@@ -521,9 +560,16 @@ t_df_clean[t_name_col] = t_df_clean[t_name_col].astype(str).str.strip()
 s_df_clean[s_amt] = s_df_clean[s_amt].apply(clean_number)
 t_df_clean[t_amt] = t_df_clean[t_amt].apply(clean_number)
 
-# ★ 핵심 개선: 엑셀 파일 내 실제 '공식 총계' 추출 (중복 합산 원천 차단)
-official_s_total, s_total_source_name = extract_smart_grand_total(s_df_clean, s_name_col, s_amt)
+# 재단 양식 총계 먼저 산출 (수입인지 지출인지 파악)
 official_t_total, t_total_source_name = extract_smart_grand_total(t_df_clean, t_name_col, t_amt)
+total_type = "수입" if "수입" in t_total_source_name else ("지출" if "지출" in t_total_source_name else "전체")
+
+# 학교 양식 총계 정밀 산출
+official_s_total, s_total_source_name = extract_smart_grand_total(
+    s_df_clean, s_name_col, s_amt, 
+    target_total_type=total_type, 
+    forced_row=forced_s_total_row
+)
 grand_diff = official_s_total - official_t_total
 
 # 재단 항목별 합산 룩업 생성
@@ -536,7 +582,7 @@ target_clean_dict = {raw_name: clean_account_name(raw_name) for raw_name in raw_
 target_options = ["(매칭 제외)"] + raw_target_list
 
 saved_history = get_saved_mappings()
-# 세부 계정만 추출 (상위 집계 행은 브릿지 목록에서 배제하여 오매칭 방지)
+# 상위 집계 행 및 총계 행은 대조 리스트에서 배제하여 오매칭 방지
 unique_source_items = sorted([str(x).strip() for x in s_df_clean[s_name_col].unique() if str(x).strip() and not is_aggregate_account(str(x))])
 
 # 매칭 결과 구성
@@ -580,13 +626,12 @@ match_items = len(res_df[res_df["val_status"] == "✅ 정상 일치"])
 error_items = len(res_df[res_df["val_status"] == "❌ 차액 발생"])
 unmatched_items = len(res_df[res_df["val_status"] == "⚠️ 미매칭"])
 
-# 총계 출처가 명시된 자금 정합성 배너
 border_color = "#059669" if abs(grand_diff) < 1 else "#DC2626"
 diff_summary_text = "총계 완벽 일치 (0원)" if abs(grand_diff) < 1 else f"총계 차액: {grand_diff:+,.0f} 원"
 
 st.markdown(f"""
 <div class="kpi-card" style="margin-bottom: 20px; border-left: 6px solid {border_color};">
-    <div style="font-size: 13px; font-weight: 600; color: #64748B;">자금 결산 정합성 현황 (시트 내 공식 총계 행 기반)</div>
+    <div style="font-size: 13px; font-weight: 600; color: #64748B;">자금 결산 정합성 현황 (공식 총계 행 기반)</div>
     <div style="font-size: 17px; font-weight: 700; color: #0F172A; margin-top: 6px;">
         {left_label_input} 총계: <b style="color:#1E40AF;">{official_s_total:,.0f} 원</b> 
         <span style="font-size:12px; color:#64748B; font-weight:normal;">(출처: {s_total_source_name})</span>
@@ -601,7 +646,6 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# 4개 통계 카드
 m1, m2, m3, m4 = st.columns(4)
 m1.markdown(f"""<div class="kpi-card"><div style="color: #64748B; font-size:12px; font-weight:600;">세부 검증 항목</div><div class="kpi-val" style="color: #0F172A;">{total_items}건</div></div>""", unsafe_allow_html=True)
 m2.markdown(f"""<div class="kpi-card" style="border-color: #A7F3D0; background-color: #F0FDF4;"><div style="color: #059669; font-size:12px; font-weight:600;">정상 일치</div><div class="kpi-val" style="color: #059669;">{match_items}건 <span style="font-size:13px;">({(match_items/total_items*100 if total_items else 0):.1f}%)</span></div></div>""", unsafe_allow_html=True)
@@ -629,7 +673,6 @@ if search_keyword.strip():
     kw = search_keyword.strip()
     filtered_df = filtered_df[filtered_df["source_name"].str.contains(kw) | filtered_df["target_name"].str.contains(kw)]
 
-# 대조 룸 헤더 3열
 b_col1, b_col2, b_col3 = st.columns([1.2, 1.6, 1.2])
 with b_col1:
     st.markdown(f"#### 🏫 {left_label_input} (기준 원장)")
@@ -643,7 +686,6 @@ with b_col3:
 
 st.markdown("<hr style='margin-top: 2px; margin-bottom: 12px; border-color: #E2E8F0;'>", unsafe_allow_html=True)
 
-# 브릿지 행 리스트 렌더링
 selected_row_data = None
 
 for idx, r in filtered_df.iterrows():
@@ -660,7 +702,6 @@ for idx, r in filtered_df.iterrows():
         
     c1, c2, c3 = st.columns([1.2, 1.6, 1.2])
     
-    # 1열: 학교 결산 카드
     with c1:
         sel_class = "panel-selected" if is_selected else ""
         st.markdown(f"""
@@ -670,7 +711,6 @@ for idx, r in filtered_df.iterrows():
         </div>
         """, unsafe_allow_html=True)
 
-    # 2열: 중앙 실시간 브릿지 (차액 & 변경)
     with c2:
         bridge_style = "bridge-match" if v_status == "✅ 정상 일치" else ("bridge-error" if v_status == "❌ 차액 발생" else "bridge-unmatched")
         diff_color = "#059669" if v_status == "✅ 정상 일치" else ("#DC2626" if v_status == "❌ 차액 발생" else "#D97706")
@@ -695,7 +735,6 @@ for idx, r in filtered_df.iterrows():
                     st.session_state.selected_inspect_item = s_name
                     st.rerun()
 
-    # 3열: 재단 양식 카드
     with c3:
         sel_class = "panel-selected" if is_selected else ""
         t_display_name = t_name if t_name != "(매칭 제외)" else "<span style='color:#D97706;'>(매칭 제외)</span>"
@@ -724,7 +763,6 @@ if selected_row_data is not None:
     
     insp1, insp2, insp3 = st.columns([1.1, 1.4, 1.2])
     
-    # 1열: 자동 문제 원인 진단
     with insp1:
         st.markdown("##### 1. 문제 원인 자동 진단")
         if is_aggregate_account(t_curr):
@@ -737,7 +775,6 @@ if selected_row_data is not None:
             st.info(f"• 계정명은 유사하나 금액이 {abs(diff_curr):,.0f}원 일치하지 않습니다.")
             st.caption("양측 회계 처리 기준 차이 또는 다른 세부 계정과의 분할 입력을 확인하세요.")
 
-    # 2열: AI/스마트 추천 (차액 0원 되는 계정 탐색)
     with insp2:
         st.markdown("##### 2. AI 추천 최적 재단 계정")
         zero_diff_candidates = []
@@ -772,7 +809,6 @@ if selected_row_data is not None:
             else:
                 st.caption("자동 추천 후보가 없습니다. 3번에서 직접 선택해 주세요.")
 
-    # 3열: 수동 검색 및 매칭 확정
     with insp3:
         st.markdown("##### 3. 수동 검색 및 확정")
         def_idx = target_options.index(t_curr) if t_curr in target_options else 0
