@@ -97,7 +97,6 @@ def init_db():
         )
     """)
     
-    # settings_json 컬럼 존재 여부 확인 후 없으면 추가
     cursor.execute("PRAGMA table_info(project_workspaces)")
     cols = [c[1] for c in cursor.fetchall()]
     if "settings_json" not in cols:
@@ -128,6 +127,19 @@ def create_project(name):
             INSERT INTO project_workspaces (project_id, left_label, right_label, source_data_json, target_data_json, settings_json, updated_at)
             VALUES (?, '학교 양식', '재단 양식', NULL, NULL, '{}', ?)
         """, (new_id, now))
+        conn.commit()
+        success = True
+    except sqlite3.IntegrityError:
+        success = False
+    conn.close()
+    return success
+
+# ★ 프로젝트 이름 수정 함수 추가
+def rename_project(project_id, new_name):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("UPDATE projects SET name = ? WHERE id = ?", (new_name.strip(), project_id))
         conn.commit()
         success = True
     except sqlite3.IntegrityError:
@@ -367,18 +379,20 @@ def extract_smart_grand_total(df, name_col, amt_col, target_total_type="수입",
     return float(pure_sum), "세부계정 순합계"
 
 # ==========================================
-# 5. 사이드바: 프로젝트 관리 (URL 상태 연동)
+# 5. 사이드바: 프로젝트 관리 & 이름 수정 기능
 # ==========================================
 projects_df = get_projects()
 
 with st.sidebar:
     st.header("📂 프로젝트 관리")
     
+    # 새 프로젝트 등록
     with st.expander("➕ 새 프로젝트 생성", expanded=False):
-        new_proj_name = st.text_input("프로젝트 이름 입력", placeholder="예: 2025 본결산 (등록금)")
+        new_proj_name = st.text_input("새 프로젝트 이름", placeholder="예: 2025 본결산 (등록금)")
         if st.button("프로젝트 등록", use_container_width=True, type="primary"):
             if new_proj_name.strip():
                 if create_project(new_proj_name.strip()):
+                    st.query_params["project"] = new_proj_name.strip()
                     st.success("프로젝트가 생성되었습니다!")
                     st.rerun()
                 else:
@@ -389,17 +403,33 @@ with st.sidebar:
     if not projects_df.empty:
         project_names = projects_df['name'].tolist()
         
-        # URL 쿼리 파라미터에서 이전 프로젝트 복원
         url_proj = st.query_params.get("project", None)
         default_idx = project_names.index(url_proj) if url_proj in project_names else 0
         
         selected_project_name = st.selectbox("📋 작업 대상 프로젝트", project_names, index=default_idx)
-        st.query_params["project"] = selected_project_name  # URL 상태 즉시 동기화
+        st.query_params["project"] = selected_project_name
         
         current_project = projects_df[projects_df['name'] == selected_project_name].iloc[0]
         curr_project_id = int(current_project['id'])
         st.caption(f"생성일시: {current_project['created_at']}")
         
+        # ★ 프로젝트 이름 수정 기능 (새로 추가됨)
+        with st.expander("✏️ 프로젝트 이름 수정", expanded=False):
+            rename_input = st.text_input("변경할 프로젝트 이름", value=selected_project_name, key=f"rename_input_{curr_project_id}")
+            if st.button("이름 변경 저장", use_container_width=True, type="primary"):
+                clean_new_name = rename_input.strip()
+                if clean_new_name and clean_new_name != selected_project_name:
+                    if rename_project(curr_project_id, clean_new_name):
+                        st.query_params["project"] = clean_new_name
+                        st.success("프로젝트 이름이 성공적으로 변경되었습니다!")
+                        st.rerun()
+                    else:
+                        st.error("이미 존재하는 다른 프로젝트 이름입니다.")
+                elif clean_new_name == selected_project_name:
+                    st.info("현재 이름과 동일합니다.")
+                else:
+                    st.warning("이름을 입력해 주세요.")
+
         st.divider()
         if st.button("🗑️ 선택된 프로젝트 삭제", type="secondary", use_container_width=True):
             delete_project(curr_project_id)
@@ -491,12 +521,11 @@ if source_df is None or target_df is None:
     st.stop()
 
 # ----------------------------------------------------
-# 2단계: 대조 열 및 총계 행 설정 (설정값 DB 영구 보존)
+# 2단계: 대조 열 및 총계 행 설정 (자동 영구 저장)
 # ----------------------------------------------------
 source_cols = list(source_df.columns)
 target_cols = list(target_df.columns)
 
-# DB에 저장되어 있던 이전 설정값 불러오기
 def_s_name = saved_settings.get("s_name_col", source_cols[0] if source_cols else None)
 def_t_name = saved_settings.get("t_name_col", target_cols[0] if target_cols else None)
 def_s_amt = saved_settings.get("s_amt", source_cols[min(2, len(source_cols)-1)] if source_cols else None)
@@ -555,7 +584,6 @@ with st.expander("⚙️ 2단계: 대조 열 및 양측 총계 행 설정 (자�
                 preview_amt_t = clean_number(row_match_t.iloc[-1][t_amt])
                 st.caption(f"확인된 금액: **{preview_amt_t:,.0f} 원**")
 
-    # 설정값이 변경되었으면 DB에 자동 영구 저장
     current_settings = {
         "s_name_col": s_name_col,
         "t_name_col": t_name_col,
@@ -771,7 +799,6 @@ edited_df = st.data_editor(
     }
 )
 
-# 인라인 수정 사항 저장 버튼
 save_col1, save_col2 = st.columns([3, 1])
 with save_col2:
     if st.button("💾 표에서 변경한 매칭 일괄 영구 저장", type="primary", use_container_width=True):
