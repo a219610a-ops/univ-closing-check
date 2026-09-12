@@ -55,7 +55,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. SQLite 데이터베이스 초기화 및 원본 바이너리 저장 확장
+# 2. SQLite 데이터베이스 초기화 및 설정 테이블 확장
 # ==========================================
 def get_db_connection():
     conn = sqlite3.connect("accounting_audit.db", check_same_thread=False)
@@ -101,7 +101,6 @@ def init_db():
     
     cursor.execute("PRAGMA table_info(project_workspaces)")
     cols = [c[1] for c in cursor.fetchall()]
-    # 기존 DB 호환성 컬럼 자동 추가
     for col_name, col_type in [
         ("source_raw_blob", "BLOB"),
         ("target_raw_blob", "BLOB"),
@@ -196,16 +195,25 @@ def get_workspace_files(project_id):
         "settings": {}
     }
 
-def update_workspace_file_blob(project_id, side, file_bytes):
+def update_workspace_file_blob(project_id, side, file_bytes, default_sheet=None):
     conn = get_db_connection()
     cursor = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    col_name = "source_raw_blob" if side == "source" else "target_raw_blob"
-    cursor.execute(f"""
-        UPDATE project_workspaces 
-        SET {col_name} = ?, updated_at = ?
-        WHERE project_id = ?
-    """, (file_bytes, now, project_id))
+    blob_col = "source_raw_blob" if side == "source" else "target_raw_blob"
+    sheet_col = "source_sheet_name" if side == "source" else "target_sheet_name"
+    
+    if default_sheet:
+        cursor.execute(f"""
+            UPDATE project_workspaces 
+            SET {blob_col} = ?, {sheet_col} = ?, updated_at = ?
+            WHERE project_id = ?
+        """, (file_bytes, default_sheet, now, project_id))
+    else:
+        cursor.execute(f"""
+            UPDATE project_workspaces 
+            SET {blob_col} = ?, updated_at = ?
+            WHERE project_id = ?
+        """, (file_bytes, now, project_id))
     conn.commit()
     conn.close()
 
@@ -437,7 +445,6 @@ with st.sidebar:
     
     if not projects_df.empty:
         project_names = projects_df['name'].tolist()
-        
         url_proj = st.query_params.get("project", None)
         if url_proj not in project_names:
             url_proj = project_names[0]
@@ -453,7 +460,6 @@ with st.sidebar:
             is_active = (p_name == selected_project_name)
             
             p_col1, p_col2 = st.columns([4, 1])
-            
             with p_col1:
                 btn_type = "primary" if is_active else "secondary"
                 prefix = "✓ " if is_active else "• "
@@ -502,7 +508,7 @@ saved_settings = workspace_files.get("settings", {})
 h_col1, h_col2 = st.columns([4, 1])
 with h_col1:
     st.markdown('<div class="main-app-title">📊 데이터 스마트 검증기</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="main-app-caption">📌 현재 프로젝트: <b>{selected_project_name}</b> | 대상 시트를 언제든 자유롭게 변경하여 대조할 수 있습니다.</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="main-app-caption">📌 현재 프로젝트: <b>{selected_project_name}</b> | 양쪽 파일의 대상 시트를 자유롭게 선택해 검증할 수 있습니다.</div>', unsafe_allow_html=True)
 with h_col2:
     if st.button("🔄 데이터 초기화", use_container_width=True):
         reset_workspace_data(curr_project_id)
@@ -513,14 +519,14 @@ with h_col2:
         st.rerun()
 
 # ----------------------------------------------------
-# 1단계: 엑셀 파일 업로드 및 상시 대상 시트 선택 (핵심 개선)
+# 1단계: 엑셀 파일 업로드 및 상시 대상 시트 선택 (충돌 완벽 제거)
 # ----------------------------------------------------
 source_blob = workspace_files["source_raw_blob"]
 target_blob = workspace_files["target_raw_blob"]
 source_df = None
 target_df = None
 
-with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 선택 (상시 변경 가능)", expanded=(source_blob is None or target_blob is None)):
+with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 선택 (양쪽 모두 상시 변경 가능)", expanded=(source_blob is None or target_blob is None)):
     lbl_c1, lbl_c2 = st.columns(2)
     with lbl_c1:
         left_label_input = st.text_input("기준 파일 라벨", value=workspace_files["left_label"], key=f"left_lbl_{curr_project_id}")
@@ -533,15 +539,21 @@ with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 선택
 
     f_col1, f_col2 = st.columns(2)
 
-    # 1) 학교 파일 & 시트 관리
+    # 1) 기준 파일 (학교 양식)
     with f_col1:
-        st.markdown(f"**🏫 {left_label_input} (.xlsx)**")
-        new_s_file = st.file_uploader(f"{left_label_input} 파일 업로드", type=["xlsx"], key=f"s_uploader_{curr_project_id}")
+        st.markdown(f"**🏫 {left_label_input} 파일**")
+        new_s_file = st.file_uploader(f"{left_label_input} 등록 (.xlsx, .xls)", type=["xlsx", "xls"], key=f"s_uploader_{curr_project_id}")
         if new_s_file is not None:
-            source_blob = new_s_file.read()
-            update_workspace_file_blob(curr_project_id, "source", source_blob)
-            st.success("파일 저장 완료!")
-            st.rerun()
+            bytes_val = new_s_file.getvalue()
+            # 파일이 변경되었을 때만 저장
+            if source_blob != bytes_val:
+                try:
+                    xl_test = pd.ExcelFile(io.BytesIO(bytes_val))
+                    init_sheet = xl_test.sheet_names[0]
+                    update_workspace_file_blob(curr_project_id, "source", bytes_val, default_sheet=init_sheet)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"엑셀 파일 읽기 실패: {e}")
 
         if source_blob is not None:
             try:
@@ -550,31 +562,37 @@ with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 선택
                 cur_s_sheet = workspace_files.get("source_sheet_name")
                 s_idx = s_sheet_names.index(cur_s_sheet) if cur_s_sheet in s_sheet_names else 0
                 
-                # ★ 상시 선택 가능한 대상 시트 드롭다운
                 chosen_s_sheet = st.selectbox(
-                    f"📑 {left_label_input} 대상 시트 선택",
+                    f"📑 [{left_label_input}] 대상 시트 선택",
                     s_sheet_names,
                     index=s_idx,
-                    key=f"s_sheet_select_{curr_project_id}"
+                    key=f"select_s_sheet_{curr_project_id}"
                 )
                 if chosen_s_sheet != cur_s_sheet:
                     update_workspace_sheet_choice(curr_project_id, "source", chosen_s_sheet)
                     st.rerun()
 
                 source_df = pd.read_excel(io.BytesIO(source_blob), sheet_name=chosen_s_sheet)
-                st.caption(f"✓ '{chosen_s_sheet}' 시트 로드됨 ({len(source_df)}행)")
+                st.caption(f"✓ '{chosen_s_sheet}' 로드됨 ({len(source_df)}행)")
             except Exception as e:
-                st.error(f"시트 읽기 오류: {e}")
+                st.error(f"시트 로드 실패: {e}")
+        else:
+            st.info(f"👆 {left_label_input} 파일을 업로드해 주세요.")
 
-    # 2) 재단 파일 & 시트 관리
+    # 2) 대조 파일 (재단 양식) - 완벽 복원
     with f_col2:
-        st.markdown(f"**🏛️ {right_label_input} (.xlsx)**")
-        new_t_file = st.file_uploader(f"{right_label_input} 파일 업로드", type=["xlsx"], key=f"t_uploader_{curr_project_id}")
+        st.markdown(f"**🏛️ {right_label_input} 파일**")
+        new_t_file = st.file_uploader(f"{right_label_input} 등록 (.xlsx, .xls)", type=["xlsx", "xls"], key=f"t_uploader_{curr_project_id}")
         if new_t_file is not None:
-            target_blob = new_t_file.read()
-            update_workspace_file_blob(curr_project_id, "target", target_blob)
-            st.success("파일 저장 완료!")
-            st.rerun()
+            bytes_val_t = new_t_file.getvalue()
+            if target_blob != bytes_val_t:
+                try:
+                    xl_test_t = pd.ExcelFile(io.BytesIO(bytes_val_t))
+                    init_sheet_t = xl_test_t.sheet_names[0]
+                    update_workspace_file_blob(curr_project_id, "target", bytes_val_t, default_sheet=init_sheet_t)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"엑셀 파일 읽기 실패: {e}")
 
         if target_blob is not None:
             try:
@@ -583,24 +601,26 @@ with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 선택
                 cur_t_sheet = workspace_files.get("target_sheet_name")
                 t_idx = t_sheet_names.index(cur_t_sheet) if cur_t_sheet in t_sheet_names else 0
                 
-                # ★ 상시 선택 가능한 대상 시트 드롭다운
+                # ★ 대조 파일 대상 시트 선택 드롭다운 (완벽 활성화)
                 chosen_t_sheet = st.selectbox(
-                    f"📑 {right_label_input} 대상 시트 선택",
+                    f"📑 [{right_label_input}] 대상 시트 선택",
                     t_sheet_names,
                     index=t_idx,
-                    key=f"t_sheet_select_{curr_project_id}"
+                    key=f"select_t_sheet_{curr_project_id}"
                 )
                 if chosen_t_sheet != cur_t_sheet:
                     update_workspace_sheet_choice(curr_project_id, "target", chosen_t_sheet)
                     st.rerun()
 
                 target_df = pd.read_excel(io.BytesIO(target_blob), sheet_name=chosen_t_sheet)
-                st.caption(f"✓ '{chosen_t_sheet}' 시트 로드됨 ({len(target_df)}행)")
+                st.caption(f"✓ '{chosen_t_sheet}' 로드됨 ({len(target_df)}행)")
             except Exception as e:
-                st.error(f"시트 읽기 오류: {e}")
+                st.error(f"시트 로드 실패: {e}")
+        else:
+            st.info(f"👆 {right_label_input} 파일을 업로드해 주세요.")
 
 if source_df is None or target_df is None:
-    st.info("💡 1단계 카드에서 두 엑셀 파일을 업로드하고 [대상 시트]를 선택해 주세요.")
+    st.info("💡 1단계 카드에서 두 엑셀 파일을 업로드하고 [대상 시트]를 각각 선택해 주세요.")
     st.stop()
 
 # ----------------------------------------------------
