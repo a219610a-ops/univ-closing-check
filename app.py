@@ -19,7 +19,7 @@ st.set_page_config(
 # 화사하고 세련된 Bright Light UI 스타일링
 st.markdown("""
 <style>
-    /* 전체 배경 및 폰트 */
+    /* 전체 배경 */
     .stApp {
         background-color: #F8FAFC;
     }
@@ -88,9 +88,6 @@ st.markdown("""
         font-size: 11px;
         font-weight: 600;
     }
-    .badge-match { background-color: #D1FAE5; color: #065F46; }
-    .badge-error { background-color: #FEE2E2; color: #991B1B; }
-    .badge-unmatched { background-color: #FEF3C7; color: #92400E; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -279,23 +276,6 @@ def save_single_mapping(source_name, target_name):
         conn.commit()
     conn.close()
 
-def save_mapping_rules(mapping_list):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    for item in mapping_list:
-        s_name = item.get("source_name", "").strip()
-        t_name = item.get("target_name", "").strip()
-        if s_name and t_name and t_name != "(매칭 제외)":
-            cursor.execute("""
-                INSERT INTO account_mappings (source_name, target_name, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(source_name, target_name) 
-                DO UPDATE SET updated_at=excluded.updated_at
-            """, (s_name, t_name, now))
-    conn.commit()
-    conn.close()
-
 # ==========================================
 # 3. 고도화된 정밀 스마트 매칭 엔진
 # ==========================================
@@ -314,6 +294,17 @@ def clean_account_name(raw_name):
     text = re.sub(r'^[0-9\.\-\_\(\)\[\]\s]+', '', text)
     clean_text = re.sub(r'[\s\.\-\_\(\)\[\]]+', '', text)
     return clean_text if clean_text else text
+
+def clean_number(val):
+    if pd.isna(val):
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    val_str = str(val).replace(",", "").strip()
+    try:
+        return float(val_str)
+    except ValueError:
+        return 0.0
 
 def find_smart_match(source_name, target_options, target_clean_dict, saved_history):
     if source_name in saved_history and saved_history[source_name] in target_options:
@@ -350,7 +341,43 @@ def find_smart_match(source_name, target_options, target_clean_dict, saved_histo
     return "(매칭 제외)", "미매칭"
 
 # ==========================================
-# 4. 사이드바: 프로젝트 관리 (원래 방식 100% 유지)
+# 4. 스마트 공식 총계 추출 함수 (중복 합산 방지)
+# ==========================================
+def extract_smart_grand_total(df, name_col, amt_col):
+    """
+    엑셀 시트에서 '자금수입총계', '자금지출총계', '총계' 등 공식 총계 행을 지능적으로 탐색.
+    발견 시 해당 행의 금액과 행 이름을 반환하고,
+    총계 행이 없으면 소계/합계를 제외한 순수 세부 계정의 합계를 산출.
+    """
+    if df is None or df.empty or name_col not in df.columns or amt_col not in df.columns:
+        return 0.0, "데이터 없음"
+        
+    temp = df.dropna(subset=[name_col]).copy()
+    temp[name_col] = temp[name_col].astype(str).str.strip()
+    temp['__amt_clean'] = temp[amt_col].apply(clean_number)
+    
+    # 1순위: '자금수입총계', '자금지출총계', '수입총계', '지출총계' 등 명확한 총계 행 탐색
+    primary_patterns = [r'자금수입총계', r'자금지출총계', r'수입총계', r'지출총계', r'총\s*계', r'합\s*계']
+    for pat in primary_patterns:
+        matched = temp[temp[name_col].str.contains(pat, regex=True, na=False)]
+        if not matched.empty:
+            # 0이 아닌 유효 금액을 가진 마지막 총계 행 선택
+            valid_rows = matched[matched['__amt_clean'] > 0]
+            if not valid_rows.empty:
+                chosen = valid_rows.iloc[-1]
+                return float(chosen['__amt_clean']), chosen[name_col]
+            else:
+                chosen = matched.iloc[-1]
+                return float(chosen['__amt_clean']), chosen[name_col]
+
+    # 2순위: 총계 행이 따로 명시되지 않은 경우, 소계/합계를 제외한 순수 세부 계정만의 합산
+    exclude_pattern = '|'.join(EXCLUDE_KEYWORDS)
+    pure_details = temp[~temp[name_col].str.contains(exclude_pattern, regex=True, na=False)]
+    pure_sum = pure_details['__amt_clean'].sum()
+    return float(pure_sum), "세부계정 순합계"
+
+# ==========================================
+# 5. 사이드바: 프로젝트 관리
 # ==========================================
 with st.sidebar:
     st.header("📂 프로젝트 관리")
@@ -387,7 +414,7 @@ with st.sidebar:
         st.info("새 프로젝트를 먼저 등록해 주세요.")
 
 # ==========================================
-# 5. 메인 화면 헤더 및 제어 바
+# 6. 메인 화면 로직
 # ==========================================
 if not selected_project_name:
     st.title("⚡ 데이터 스마트 검증기")
@@ -396,12 +423,11 @@ if not selected_project_name:
 
 workspace_state = get_workspace(curr_project_id)
 
-# 세션 상태 선택 항목 초기화
 if "selected_inspect_item" not in st.session_state:
     st.session_state.selected_inspect_item = None
 
 # 탑 헤더 바
-h_col1, h_col2, h_col3 = st.columns([3.5, 1, 1])
+h_col1, h_col2 = st.columns([4, 1])
 with h_col1:
     st.title("⚡ 스마트 결산 대조 룸 (Reconciliation Room)")
     st.caption(f"📌 현재 활성 프로젝트: **{selected_project_name}** | 양측 결산서를 실시간 브릿지로 대조하고 차액을 진단합니다.")
@@ -411,11 +437,9 @@ with h_col2:
         st.session_state.selected_inspect_item = None
         st.success("데이터가 초기화되었습니다.")
         st.rerun()
-with h_col3:
-    pass # 엑셀 다운로드 버튼 자리
 
 # ----------------------------------------------------
-# 1단계: 엑셀 파일 업로드 및 시트 지정 (접이식 카드로 정돈)
+# 1단계: 엑셀 파일 업로드 및 시트 지정
 # ----------------------------------------------------
 with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 설정", expanded=(workspace_state["source_data"] is None or workspace_state["target_data"] is None)):
     lbl_c1, lbl_c2 = st.columns(2)
@@ -469,7 +493,7 @@ if source_df is None or target_df is None:
     st.stop()
 
 # ----------------------------------------------------
-# 2단계: 기준 열 및 금액 열 지정
+# 2단계: 대조 열(과목명 및 금액) 설정
 # ----------------------------------------------------
 with st.expander("⚙️ 2단계: 대조 열(과목명 및 금액) 설정", expanded=False):
     col_c1, col_c2 = st.columns(2)
@@ -485,22 +509,10 @@ with st.expander("⚙️ 2단계: 대조 열(과목명 및 금액) 설정", expa
         s_amt = st.selectbox(f"비교할 금액 열 ({left_label_input})", source_cols, index=min(2, len(source_cols)-1))
     with ac2:
         t_amt = st.selectbox(f"비교할 금액 열 ({right_label_input})", target_cols, index=min(2, len(target_cols)-1))
-    matched_amount_cols = [(s_amt, t_amt)]
 
 # ----------------------------------------------------
-# 3~4단계: 스마트 데이터 집계 및 브릿지 분석
+# 3단계: 정밀 총계 산출 및 데이터 매칭
 # ----------------------------------------------------
-def clean_number(val):
-    if pd.isna(val):
-        return 0.0
-    if isinstance(val, (int, float)):
-        return float(val)
-    val_str = str(val).replace(",", "").strip()
-    try:
-        return float(val_str)
-    except ValueError:
-        return 0.0
-
 s_df_clean = source_df.dropna(subset=[s_name_col]).copy()
 t_df_clean = target_df.dropna(subset=[t_name_col]).copy()
 
@@ -509,7 +521,12 @@ t_df_clean[t_name_col] = t_df_clean[t_name_col].astype(str).str.strip()
 s_df_clean[s_amt] = s_df_clean[s_amt].apply(clean_number)
 t_df_clean[t_amt] = t_df_clean[t_amt].apply(clean_number)
 
-# 재단 데이터 항목별 합산 룩업 생성
+# ★ 핵심 개선: 엑셀 파일 내 실제 '공식 총계' 추출 (중복 합산 원천 차단)
+official_s_total, s_total_source_name = extract_smart_grand_total(s_df_clean, s_name_col, s_amt)
+official_t_total, t_total_source_name = extract_smart_grand_total(t_df_clean, t_name_col, t_amt)
+grand_diff = official_s_total - official_t_total
+
+# 재단 항목별 합산 룩업 생성
 target_sum_lookup = {}
 for t_name, grp in t_df_clean.groupby(t_name_col):
     target_sum_lookup[str(t_name).strip()] = grp[t_amt].sum()
@@ -519,12 +536,12 @@ target_clean_dict = {raw_name: clean_account_name(raw_name) for raw_name in raw_
 target_options = ["(매칭 제외)"] + raw_target_list
 
 saved_history = get_saved_mappings()
-unique_source_items = sorted([str(x).strip() for x in s_df_clean[s_name_col].unique() if str(x).strip()])
+# 세부 계정만 추출 (상위 집계 행은 브릿지 목록에서 배제하여 오매칭 방지)
+unique_source_items = sorted([str(x).strip() for x in s_df_clean[s_name_col].unique() if str(x).strip() and not is_aggregate_account(str(x))])
 
-# 매칭 및 결과 데이터프레임 구성
+# 매칭 결과 구성
 matched_rows = []
 for s_name in unique_source_items:
-    # 세션 상태에 저장된 수동 변경이 있으면 우선 적용
     state_key = f"match_override_{curr_project_id}_{re.sub(r'[^a-zA-Z0-9가-힣]', '_', s_name)}"
     if state_key in st.session_state:
         selected_match = st.session_state[state_key]
@@ -532,10 +549,8 @@ for s_name in unique_source_items:
     else:
         selected_match, status_text = find_smart_match(s_name, target_options, target_clean_dict, saved_history)
 
-    # 학교 금액 집계
     s_val = s_df_clean[s_df_clean[s_name_col] == s_name][s_amt].sum()
     
-    # 재단 금액 집계 및 차액 계산
     if not selected_match or selected_match == "(매칭 제외)":
         t_val = 0.0
         diff = s_val
@@ -558,25 +573,29 @@ for s_name in unique_source_items:
 res_df = pd.DataFrame(matched_rows)
 
 # ----------------------------------------------------
-# 상단 KPI 및 정합성 요약 배너
+# 4단계: 상단 정합성 배너 & 통계 카드
 # ----------------------------------------------------
 total_items = len(res_df)
 match_items = len(res_df[res_df["val_status"] == "✅ 정상 일치"])
 error_items = len(res_df[res_df["val_status"] == "❌ 차액 발생"])
 unmatched_items = len(res_df[res_df["val_status"] == "⚠️ 미매칭"])
 
-total_s_sum = s_df_clean[s_amt].sum()
-total_t_sum = t_df_clean[t_amt].sum()
-total_diff = total_s_sum - total_t_sum
+# 총계 출처가 명시된 자금 정합성 배너
+border_color = "#059669" if abs(grand_diff) < 1 else "#DC2626"
+diff_summary_text = "총계 완벽 일치 (0원)" if abs(grand_diff) < 1 else f"총계 차액: {grand_diff:+,.0f} 원"
 
-# 상단 요약 배너 카드
 st.markdown(f"""
-<div class="kpi-card" style="margin-bottom: 20px; border-left: 5px solid #059669;">
-    <div style="font-size: 13px; font-weight: 600; color: #64748B;">자금 결산 정합성 현황</div>
-    <div style="font-size: 17px; font-weight: 700; color: #059669; margin-top: 4px;">
-        {left_label_input} 총계: <b>{total_s_sum:,.0f} 원</b> ↔ {right_label_input} 총계: <b>{total_t_sum:,.0f} 원</b> 
-        <span style="color: {'#059669' if abs(total_diff) < 1 else '#DC2626'};">
-            ({'총계 완벽 일치' if abs(total_diff) < 1 else f'총계 차액: {total_diff:,.0f}원'})
+<div class="kpi-card" style="margin-bottom: 20px; border-left: 6px solid {border_color};">
+    <div style="font-size: 13px; font-weight: 600; color: #64748B;">자금 결산 정합성 현황 (시트 내 공식 총계 행 기반)</div>
+    <div style="font-size: 17px; font-weight: 700; color: #0F172A; margin-top: 6px;">
+        {left_label_input} 총계: <b style="color:#1E40AF;">{official_s_total:,.0f} 원</b> 
+        <span style="font-size:12px; color:#64748B; font-weight:normal;">(출처: {s_total_source_name})</span>
+        &nbsp;↔&nbsp; 
+        {right_label_input} 총계: <b style="color:#6D28D9;">{official_t_total:,.0f} 원</b> 
+        <span style="font-size:12px; color:#64748B; font-weight:normal;">(출처: {t_total_source_name})</span>
+        &nbsp;
+        <span style="color: {border_color}; font-size: 15px;">
+            [ {diff_summary_text} ]
         </span>
     </div>
 </div>
@@ -584,21 +603,21 @@ st.markdown(f"""
 
 # 4개 통계 카드
 m1, m2, m3, m4 = st.columns(4)
-m1.markdown(f"""<div class="kpi-card"><div style="color: #64748B; font-size:12px; font-weight:600;">전체 항목 수</div><div class="kpi-val" style="color: #0F172A;">{total_items}건</div></div>""", unsafe_allow_html=True)
+m1.markdown(f"""<div class="kpi-card"><div style="color: #64748B; font-size:12px; font-weight:600;">세부 검증 항목</div><div class="kpi-val" style="color: #0F172A;">{total_items}건</div></div>""", unsafe_allow_html=True)
 m2.markdown(f"""<div class="kpi-card" style="border-color: #A7F3D0; background-color: #F0FDF4;"><div style="color: #059669; font-size:12px; font-weight:600;">정상 일치</div><div class="kpi-val" style="color: #059669;">{match_items}건 <span style="font-size:13px;">({(match_items/total_items*100 if total_items else 0):.1f}%)</span></div></div>""", unsafe_allow_html=True)
-m3.markdown(f"""<div class="kpi-card" style="border-color: #FECACA; background-color: #FEF2F2;"><div style="color: #DC2626; font-size:12px; font-weight:600;">차액 불일치(오류)</div><div class="kpi-val" style="color: #DC2626;">{error_items}건</div></div>""", unsafe_allow_html=True)
+m3.markdown(f"""<div class="kpi-card" style="border-color: #FECACA; background-color: #FEF2F2;"><div style="color: #DC2626; font-size:12px; font-weight:600;">차액 오류(확인필요)</div><div class="kpi-val" style="color: #DC2626;">{error_items}건</div></div>""", unsafe_allow_html=True)
 m4.markdown(f"""<div class="kpi-card" style="border-color: #FDE68A; background-color: #FFFBEB;"><div style="color: #D97706; font-size:12px; font-weight:600;">미매칭 항목</div><div class="kpi-val" style="color: #D97706;">{unmatched_items}건</div></div>""", unsafe_allow_html=True)
 
 st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
 
 # ----------------------------------------------------
-# 3분할 스마트 매칭 브릿지 대조 룸 (메인 뷰)
+# 5단계: 3분할 스마트 매칭 브릿지 대조 룸 (메인 뷰)
 # ----------------------------------------------------
 view_ctrl1, view_ctrl2 = st.columns([2, 1])
 with view_ctrl1:
     filter_choice = st.radio("표시 필터", ["전체 항목", "❌ 차액 오류만 집중 검토", "⚠️ 미매칭 항목만 보기"], horizontal=True)
 with view_ctrl2:
-    search_keyword = st.text_input("🔍 계정명 빠른 검색", placeholder="예: 수업료, 유동자산...")
+    search_keyword = st.text_input("🔍 계정명 빠른 검색", placeholder="예: 수업료, 예수금...")
 
 filtered_df = res_df.copy()
 if filter_choice == "❌ 차액 오류만 집중 검토":
@@ -688,7 +707,7 @@ for idx, r in filtered_df.iterrows():
         """, unsafe_allow_html=True)
 
 # ----------------------------------------------------
-# 하단 스마트 인스펙터 (오류 원인 자동 진단 & 1클릭 해결 패널)
+# 6단계: 하단 스마트 인스펙터 (오류 원인 자동 진단 & 1클릭 해결)
 # ----------------------------------------------------
 if selected_row_data is not None:
     s_curr = selected_row_data["source_name"]
@@ -721,7 +740,6 @@ if selected_row_data is not None:
     # 2열: AI/스마트 추천 (차액 0원 되는 계정 탐색)
     with insp2:
         st.markdown("##### 2. AI 추천 최적 재단 계정")
-        # 금액이 정확히 일치하는 재단 계정 우선 탐색
         zero_diff_candidates = []
         for raw_t, sum_val in target_sum_lookup.items():
             if not is_aggregate_account(raw_t) and abs(sum_val - s_amt_val) < 1:
@@ -738,7 +756,6 @@ if selected_row_data is not None:
                 st.success("즉시 변경 및 DB 저장이 완료되었습니다!")
                 st.rerun()
         else:
-            # 텍스트 유사도 기반 후보
             clean_s = clean_account_name(s_curr)
             valid_targets = [t for t in raw_target_list if not is_aggregate_account(t)]
             fuzzy_cands = difflib.get_close_matches(clean_s, [clean_account_name(t) for t in valid_targets], n=2, cutoff=0.3)
@@ -779,11 +796,10 @@ if selected_row_data is not None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ----------------------------------------------------
-# 5단계: 결과 엑셀 다운로드 (상단 헤더 우측 및 하단)
+# 7단계: 결과 엑셀 다운로드
 # ----------------------------------------------------
 st.divider()
 
-# 다운로드용 데이터프레임 정리
 export_df = pd.DataFrame([
     {
         f"{left_label_input} 항목명": r["source_name"],
