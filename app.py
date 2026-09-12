@@ -445,6 +445,7 @@ with st.sidebar:
     
     if not projects_df.empty:
         project_names = projects_df['name'].tolist()
+        
         url_proj = st.query_params.get("project", None)
         if url_proj not in project_names:
             url_proj = project_names[0]
@@ -519,14 +520,15 @@ with h_col2:
         st.rerun()
 
 # ----------------------------------------------------
-# 1단계: 엑셀 파일 업로드 및 상시 대상 시트 선택 (충돌 완벽 제거)
+# 1단계: 엑셀 파일 업로드 및 상시 대상 시트 선택 (기본 펼침 유지)
 # ----------------------------------------------------
 source_blob = workspace_files["source_raw_blob"]
 target_blob = workspace_files["target_raw_blob"]
 source_df = None
 target_df = None
 
-with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 선택 (양쪽 모두 상시 변경 가능)", expanded=(source_blob is None or target_blob is None)):
+# ★ 핵심 개선: expanded=True 로 고정하여 파일 업로드 후에도 절대 자동으로 닫히지 않음
+with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 선택 (상시 변경 가능)", expanded=True):
     lbl_c1, lbl_c2 = st.columns(2)
     with lbl_c1:
         left_label_input = st.text_input("기준 파일 라벨", value=workspace_files["left_label"], key=f"left_lbl_{curr_project_id}")
@@ -545,7 +547,6 @@ with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 선택
         new_s_file = st.file_uploader(f"{left_label_input} 등록 (.xlsx, .xls)", type=["xlsx", "xls"], key=f"s_uploader_{curr_project_id}")
         if new_s_file is not None:
             bytes_val = new_s_file.getvalue()
-            # 파일이 변경되었을 때만 저장
             if source_blob != bytes_val:
                 try:
                     xl_test = pd.ExcelFile(io.BytesIO(bytes_val))
@@ -579,7 +580,7 @@ with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 선택
         else:
             st.info(f"👆 {left_label_input} 파일을 업로드해 주세요.")
 
-    # 2) 대조 파일 (재단 양식) - 완벽 복원
+    # 2) 대조 파일 (재단 양식)
     with f_col2:
         st.markdown(f"**🏛️ {right_label_input} 파일**")
         new_t_file = st.file_uploader(f"{right_label_input} 등록 (.xlsx, .xls)", type=["xlsx", "xls"], key=f"t_uploader_{curr_project_id}")
@@ -601,7 +602,6 @@ with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 선택
                 cur_t_sheet = workspace_files.get("target_sheet_name")
                 t_idx = t_sheet_names.index(cur_t_sheet) if cur_t_sheet in t_sheet_names else 0
                 
-                # ★ 대조 파일 대상 시트 선택 드롭다운 (완벽 활성화)
                 chosen_t_sheet = st.selectbox(
                     f"📑 [{right_label_input}] 대상 시트 선택",
                     t_sheet_names,
@@ -624,7 +624,7 @@ if source_df is None or target_df is None:
     st.stop()
 
 # ----------------------------------------------------
-# 2단계: 대조 열 및 총계 행 설정 (자동 영구 저장)
+# 2단계: 대조 열 및 총계 행 설정 (기본 펼침 유지)
 # ----------------------------------------------------
 source_cols = list(source_df.columns)
 target_cols = list(target_df.columns)
@@ -636,7 +636,8 @@ def_t_amt = saved_settings.get("t_amt", target_cols[min(2, len(target_cols)-1)] 
 def_s_tot = saved_settings.get("forced_s_total_row", "(자동 감지)")
 def_t_tot = saved_settings.get("forced_t_total_row", "(자동 감지)")
 
-with st.expander("⚙️ 2단계: 대조 열 및 양측 총계 행 설정 (자동 저장됨)", expanded=False):
+# ★ 핵심 개선: expanded=True 로 열어두어 담당자가 열과 총계를 편안히 지정할 수 있음
+with st.expander("⚙️ 2단계: 대조 열 및 양측 총계 행 설정 (자동 저장됨)", expanded=True):
     col_c1, col_c2 = st.columns(2)
     with col_c1:
         s_name_idx = source_cols.index(def_s_name) if def_s_name in source_cols else 0
