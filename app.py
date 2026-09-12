@@ -51,21 +51,11 @@ st.markdown("""
         border: 1px solid #CBD5E1;
         background-color: #FFFFFF;
     }
-
-    /* 사이드바 프로젝트 리스트 스타일링 */
-    div[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] > div.project-item-container {
-        border-radius: 8px;
-        padding: 4px;
-        transition: background-color 0.2s;
-    }
-    div[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] > div.project-item-container:hover {
-        background-color: #F1F5F9;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. SQLite 데이터베이스 초기화 및 설정 테이블 확장
+# 2. SQLite 데이터베이스 초기화 및 원본 바이너리 저장 확장
 # ==========================================
 def get_db_connection():
     conn = sqlite3.connect("accounting_audit.db", check_same_thread=False)
@@ -99,8 +89,10 @@ def init_db():
             project_id INTEGER PRIMARY KEY,
             left_label TEXT,
             right_label TEXT,
-            source_data_json TEXT,
-            target_data_json TEXT,
+            source_raw_blob BLOB,
+            target_raw_blob BLOB,
+            source_sheet_name TEXT,
+            target_sheet_name TEXT,
             settings_json TEXT,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -109,11 +101,19 @@ def init_db():
     
     cursor.execute("PRAGMA table_info(project_workspaces)")
     cols = [c[1] for c in cursor.fetchall()]
-    if "settings_json" not in cols:
-        try:
-            cursor.execute("ALTER TABLE project_workspaces ADD COLUMN settings_json TEXT")
-        except Exception:
-            pass
+    # 기존 DB 호환성 컬럼 자동 추가
+    for col_name, col_type in [
+        ("source_raw_blob", "BLOB"),
+        ("target_raw_blob", "BLOB"),
+        ("source_sheet_name", "TEXT"),
+        ("target_sheet_name", "TEXT"),
+        ("settings_json", "TEXT")
+    ]:
+        if col_name not in cols:
+            try:
+                cursor.execute(f"ALTER TABLE project_workspaces ADD COLUMN {col_name} {col_type}")
+            except Exception:
+                pass
 
     conn.commit()
     conn.close()
@@ -134,8 +134,8 @@ def create_project(name):
         cursor.execute("INSERT INTO projects (name, created_at) VALUES (?, ?)", (name, now))
         new_id = cursor.lastrowid
         cursor.execute("""
-            INSERT INTO project_workspaces (project_id, left_label, right_label, source_data_json, target_data_json, settings_json, updated_at)
-            VALUES (?, '학교 양식', '재단 양식', NULL, NULL, '{}', ?)
+            INSERT INTO project_workspaces (project_id, left_label, right_label, settings_json, updated_at)
+            VALUES (?, '학교 양식', '재단 양식', '{}', ?)
         """, (new_id, now))
         conn.commit()
         success = True
@@ -163,51 +163,74 @@ def delete_project(project_id):
     conn.commit()
     conn.close()
 
-def get_workspace(project_id):
+def get_workspace_files(project_id):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT left_label, right_label, source_data_json, target_data_json, settings_json FROM project_workspaces WHERE project_id = ?", (project_id,))
+    cursor.execute("""
+        SELECT left_label, right_label, source_raw_blob, target_raw_blob, 
+               source_sheet_name, target_sheet_name, settings_json 
+        FROM project_workspaces WHERE project_id = ?
+    """, (project_id,))
     row = cursor.fetchone()
     conn.close()
     if row:
-        s_df = None
-        t_df = None
         settings = {}
         try:
-            if row[2]:
-                s_df = pd.read_json(io.StringIO(row[2]))
-            if row[3]:
-                t_df = pd.read_json(io.StringIO(row[3]))
-            if row[4]:
-                settings = json.loads(row[4])
+            if row[6]:
+                settings = json.loads(row[6])
         except Exception:
             pass
         return {
             "left_label": row[0] or "학교 양식",
             "right_label": row[1] or "재단 양식",
-            "source_data": s_df,
-            "target_data": t_df,
+            "source_raw_blob": row[2],
+            "target_raw_blob": row[3],
+            "source_sheet_name": row[4],
+            "target_sheet_name": row[5],
             "settings": settings
         }
-    return {"left_label": "학교 양식", "right_label": "재단 양식", "source_data": None, "target_data": None, "settings": {}}
+    return {
+        "left_label": "학교 양식", "right_label": "재단 양식",
+        "source_raw_blob": None, "target_raw_blob": None,
+        "source_sheet_name": None, "target_sheet_name": None,
+        "settings": {}
+    }
 
-def update_workspace(project_id, left_label, right_label, source_df, target_df):
+def update_workspace_file_blob(project_id, side, file_bytes):
     conn = get_db_connection()
     cursor = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    s_json = source_df.to_json(orient='records', force_ascii=False) if source_df is not None else None
-    t_json = target_df.to_json(orient='records', force_ascii=False) if target_df is not None else None
-    
+    col_name = "source_raw_blob" if side == "source" else "target_raw_blob"
+    cursor.execute(f"""
+        UPDATE project_workspaces 
+        SET {col_name} = ?, updated_at = ?
+        WHERE project_id = ?
+    """, (file_bytes, now, project_id))
+    conn.commit()
+    conn.close()
+
+def update_workspace_sheet_choice(project_id, side, sheet_name):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    col_name = "source_sheet_name" if side == "source" else "target_sheet_name"
+    cursor.execute(f"""
+        UPDATE project_workspaces 
+        SET {col_name} = ?, updated_at = ?
+        WHERE project_id = ?
+    """, (sheet_name, now, project_id))
+    conn.commit()
+    conn.close()
+
+def update_workspace_labels(project_id, left_label, right_label):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute("""
-        INSERT INTO project_workspaces (project_id, left_label, right_label, source_data_json, target_data_json, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(project_id) DO UPDATE SET
-            left_label=excluded.left_label,
-            right_label=excluded.right_label,
-            source_data_json=excluded.source_data_json,
-            target_data_json=excluded.target_data_json,
-            updated_at=excluded.updated_at
-    """, (project_id, left_label, right_label, s_json, t_json, now))
+        UPDATE project_workspaces 
+        SET left_label = ?, right_label = ?, updated_at = ?
+        WHERE project_id = ?
+    """, (left_label, right_label, now, project_id))
     conn.commit()
     conn.close()
 
@@ -230,7 +253,9 @@ def reset_workspace_data(project_id):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute("""
         UPDATE project_workspaces 
-        SET source_data_json = NULL, target_data_json = NULL, settings_json = '{}', updated_at = ? 
+        SET source_raw_blob = NULL, target_raw_blob = NULL, 
+            source_sheet_name = NULL, target_sheet_name = NULL, 
+            settings_json = '{}', updated_at = ? 
         WHERE project_id = ?
     """, (now, project_id))
     conn.commit()
@@ -388,14 +413,13 @@ def extract_smart_grand_total(df, name_col, amt_col, target_total_type="수입",
     return float(pure_sum), "세부계정 순합계"
 
 # ==========================================
-# 5. 사이드바: 나열형 프로젝트 리스트 & 인라인 아이콘 팝오버 수정
+# 5. 사이드바: 나열형 프로젝트 리스트
 # ==========================================
 projects_df = get_projects()
 
 with st.sidebar:
     st.markdown("#### 📂 프로젝트 목록")
     
-    # 새 프로젝트 생성 (컴팩트 입력창)
     with st.expander("➕ 새 프로젝트 추가", expanded=False):
         new_proj_name = st.text_input("새 프로젝트명", placeholder="예: 2025 본결산", key="new_proj_input_side")
         if st.button("추가", use_container_width=True, type="primary"):
@@ -414,7 +438,6 @@ with st.sidebar:
     if not projects_df.empty:
         project_names = projects_df['name'].tolist()
         
-        # 현재 URL 또는 기본 프로젝트 설정
         url_proj = st.query_params.get("project", None)
         if url_proj not in project_names:
             url_proj = project_names[0]
@@ -424,7 +447,6 @@ with st.sidebar:
         selected_row = projects_df[projects_df['name'] == selected_project_name].iloc[0]
         curr_project_id = int(selected_row['id'])
 
-        # ★ 프로젝트 나열 렌더링 (드롭다운 대신 직관적인 리스트 + 아이콘 액션)
         for _, p_row in projects_df.iterrows():
             p_id = int(p_row['id'])
             p_name = p_row['name']
@@ -433,7 +455,6 @@ with st.sidebar:
             p_col1, p_col2 = st.columns([4, 1])
             
             with p_col1:
-                # 활성 프로젝트는 Primary 버튼, 비활성은 Secondary
                 btn_type = "primary" if is_active else "secondary"
                 prefix = "✓ " if is_active else "• "
                 if st.button(f"{prefix}{p_name}", key=f"sel_proj_{p_id}", type=btn_type, use_container_width=True):
@@ -441,7 +462,6 @@ with st.sidebar:
                     st.rerun()
                     
             with p_col2:
-                # 마우스 클릭 시 가볍게 열리는 인라인 수정/삭제 팝오버
                 with st.popover("✏️", help="프로젝트명 수정 및 삭제"):
                     st.markdown(f"**[{p_name}] 관리**")
                     new_pname = st.text_input("새 이름", value=p_name, key=f"inline_rename_{p_id}")
@@ -476,13 +496,13 @@ if not selected_project_name:
     st.info("👈 왼쪽 사이드바에서 새 프로젝트를 추가해 주세요.")
     st.stop()
 
-workspace_state = get_workspace(curr_project_id)
-saved_settings = workspace_state.get("settings", {})
+workspace_files = get_workspace_files(curr_project_id)
+saved_settings = workspace_files.get("settings", {})
 
 h_col1, h_col2 = st.columns([4, 1])
 with h_col1:
     st.markdown('<div class="main-app-title">📊 데이터 스마트 검증기</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="main-app-caption">📌 현재 프로젝트: <b>{selected_project_name}</b> | 설정 및 수정 사항이 자동으로 영구 유지됩니다.</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="main-app-caption">📌 현재 프로젝트: <b>{selected_project_name}</b> | 대상 시트를 언제든 자유롭게 변경하여 대조할 수 있습니다.</div>', unsafe_allow_html=True)
 with h_col2:
     if st.button("🔄 데이터 초기화", use_container_width=True):
         reset_workspace_data(curr_project_id)
@@ -493,57 +513,94 @@ with h_col2:
         st.rerun()
 
 # ----------------------------------------------------
-# 1단계: 엑셀 파일 업로드 및 시트 지정
+# 1단계: 엑셀 파일 업로드 및 상시 대상 시트 선택 (핵심 개선)
 # ----------------------------------------------------
-with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 설정", expanded=(workspace_state["source_data"] is None or workspace_state["target_data"] is None)):
+source_blob = workspace_files["source_raw_blob"]
+target_blob = workspace_files["target_raw_blob"]
+source_df = None
+target_df = None
+
+with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 선택 (상시 변경 가능)", expanded=(source_blob is None or target_blob is None)):
     lbl_c1, lbl_c2 = st.columns(2)
     with lbl_c1:
-        left_label_input = st.text_input("기준 파일 라벨", value=workspace_state["left_label"], key=f"left_lbl_{curr_project_id}")
+        left_label_input = st.text_input("기준 파일 라벨", value=workspace_files["left_label"], key=f"left_lbl_{curr_project_id}")
     with lbl_c2:
-        right_label_input = st.text_input("대조 파일 라벨", value=workspace_state["right_label"], key=f"right_lbl_{curr_project_id}")
+        right_label_input = st.text_input("대조 파일 라벨", value=workspace_files["right_label"], key=f"right_lbl_{curr_project_id}")
 
-    if (left_label_input != workspace_state["left_label"]) or (right_label_input != workspace_state["right_label"]):
-        update_workspace(curr_project_id, left_label_input, right_label_input, workspace_state["source_data"], workspace_state["target_data"])
+    if (left_label_input != workspace_files["left_label"]) or (right_label_input != workspace_files["right_label"]):
+        update_workspace_labels(curr_project_id, left_label_input, right_label_input)
         st.rerun()
 
     f_col1, f_col2 = st.columns(2)
-    source_df = workspace_state["source_data"]
-    target_df = workspace_state["target_data"]
 
+    # 1) 학교 파일 & 시트 관리
     with f_col1:
         st.markdown(f"**🏫 {left_label_input} (.xlsx)**")
-        school_file = st.file_uploader(f"{left_label_input} 파일", type=["xlsx"], key=f"s_file_{curr_project_id}")
-        if school_file:
-            try:
-                xl_s = pd.ExcelFile(school_file)
-                s_sheet = st.selectbox(f"{left_label_input} 대상 시트", xl_s.sheet_names, key=f"s_sheet_{curr_project_id}")
-                if s_sheet:
-                    source_df = pd.read_excel(school_file, sheet_name=s_sheet)
-                    update_workspace(curr_project_id, left_label_input, right_label_input, source_df, target_df)
-                    st.success(f"{left_label_input} 로드 완료 ({len(source_df)}행)")
-            except Exception as e:
-                st.error(f"오류: {e}")
-        elif source_df is not None:
-            st.info(f"💾 저장된 {left_label_input} 데이터 유지 중 ({len(source_df)}행)")
+        new_s_file = st.file_uploader(f"{left_label_input} 파일 업로드", type=["xlsx"], key=f"s_uploader_{curr_project_id}")
+        if new_s_file is not None:
+            source_blob = new_s_file.read()
+            update_workspace_file_blob(curr_project_id, "source", source_blob)
+            st.success("파일 저장 완료!")
+            st.rerun()
 
+        if source_blob is not None:
+            try:
+                xl_s = pd.ExcelFile(io.BytesIO(source_blob))
+                s_sheet_names = xl_s.sheet_names
+                cur_s_sheet = workspace_files.get("source_sheet_name")
+                s_idx = s_sheet_names.index(cur_s_sheet) if cur_s_sheet in s_sheet_names else 0
+                
+                # ★ 상시 선택 가능한 대상 시트 드롭다운
+                chosen_s_sheet = st.selectbox(
+                    f"📑 {left_label_input} 대상 시트 선택",
+                    s_sheet_names,
+                    index=s_idx,
+                    key=f"s_sheet_select_{curr_project_id}"
+                )
+                if chosen_s_sheet != cur_s_sheet:
+                    update_workspace_sheet_choice(curr_project_id, "source", chosen_s_sheet)
+                    st.rerun()
+
+                source_df = pd.read_excel(io.BytesIO(source_blob), sheet_name=chosen_s_sheet)
+                st.caption(f"✓ '{chosen_s_sheet}' 시트 로드됨 ({len(source_df)}행)")
+            except Exception as e:
+                st.error(f"시트 읽기 오류: {e}")
+
+    # 2) 재단 파일 & 시트 관리
     with f_col2:
         st.markdown(f"**🏛️ {right_label_input} (.xlsx)**")
-        found_file = st.file_uploader(f"{right_label_input} 파일", type=["xlsx"], key=f"t_file_{curr_project_id}")
-        if found_file:
+        new_t_file = st.file_uploader(f"{right_label_input} 파일 업로드", type=["xlsx"], key=f"t_uploader_{curr_project_id}")
+        if new_t_file is not None:
+            target_blob = new_t_file.read()
+            update_workspace_file_blob(curr_project_id, "target", target_blob)
+            st.success("파일 저장 완료!")
+            st.rerun()
+
+        if target_blob is not None:
             try:
-                xl_t = pd.ExcelFile(found_file)
-                t_sheet = st.selectbox(f"{right_label_input} 대상 시트", xl_t.sheet_names, key=f"t_sheet_{curr_project_id}")
-                if t_sheet:
-                    target_df = pd.read_excel(found_file, sheet_name=t_sheet)
-                    update_workspace(curr_project_id, left_label_input, right_label_input, source_df, target_df)
-                    st.success(f"{right_label_input} 로드 완료 ({len(target_df)}행)")
+                xl_t = pd.ExcelFile(io.BytesIO(target_blob))
+                t_sheet_names = xl_t.sheet_names
+                cur_t_sheet = workspace_files.get("target_sheet_name")
+                t_idx = t_sheet_names.index(cur_t_sheet) if cur_t_sheet in t_sheet_names else 0
+                
+                # ★ 상시 선택 가능한 대상 시트 드롭다운
+                chosen_t_sheet = st.selectbox(
+                    f"📑 {right_label_input} 대상 시트 선택",
+                    t_sheet_names,
+                    index=t_idx,
+                    key=f"t_sheet_select_{curr_project_id}"
+                )
+                if chosen_t_sheet != cur_t_sheet:
+                    update_workspace_sheet_choice(curr_project_id, "target", chosen_t_sheet)
+                    st.rerun()
+
+                target_df = pd.read_excel(io.BytesIO(target_blob), sheet_name=chosen_t_sheet)
+                st.caption(f"✓ '{chosen_t_sheet}' 시트 로드됨 ({len(target_df)}행)")
             except Exception as e:
-                st.error(f"오류: {e}")
-        elif target_df is not None:
-            st.info(f"💾 저장된 {right_label_input} 데이터 유지 중 ({len(target_df)}행)")
+                st.error(f"시트 읽기 오류: {e}")
 
 if source_df is None or target_df is None:
-    st.info("💡 상단의 1단계 카드에서 두 엑셀 파일을 업로드해 주시면 스마트 검증 시트가 열립니다.")
+    st.info("💡 1단계 카드에서 두 엑셀 파일을 업로드하고 [대상 시트]를 선택해 주세요.")
     st.stop()
 
 # ----------------------------------------------------
