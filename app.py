@@ -527,7 +527,6 @@ target_blob = workspace_files["target_raw_blob"]
 source_df = None
 target_df = None
 
-# ★ 핵심 개선: expanded=True 로 고정하여 파일 업로드 후에도 절대 자동으로 닫히지 않음
 with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 선택 (상시 변경 가능)", expanded=True):
     lbl_c1, lbl_c2 = st.columns(2)
     with lbl_c1:
@@ -636,7 +635,6 @@ def_t_amt = saved_settings.get("t_amt", target_cols[min(2, len(target_cols)-1)] 
 def_s_tot = saved_settings.get("forced_s_total_row", "(자동 감지)")
 def_t_tot = saved_settings.get("forced_t_total_row", "(자동 감지)")
 
-# ★ 핵심 개선: expanded=True 로 열어두어 담당자가 열과 총계를 편안히 지정할 수 있음
 with st.expander("⚙️ 2단계: 대조 열 및 양측 총계 행 설정 (자동 저장됨)", expanded=True):
     col_c1, col_c2 = st.columns(2)
     with col_c1:
@@ -818,7 +816,7 @@ m4.markdown(f"""<div class="kpi-card" style="border-color: #FDE68A; background-c
 st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
 
 # ----------------------------------------------------
-# 5단계: 📑 엑셀형 인터랙티브 스마트 시트
+# 5단계: 📑 엑셀형 인터랙티브 스마트 시트 (세로 길이 대폭 확장)
 # ----------------------------------------------------
 ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1.8, 1.2])
 
@@ -860,14 +858,16 @@ if search_keyword.strip():
     t_col_name = f"매칭 {right_label_input} 항목명"
     display_df = display_df[display_df[s_col_name].str.contains(kw) | display_df[t_col_name].str.contains(kw)]
 
-st.info(f"💡 **인라인 편집 안내:** 아래 표에서 **[매칭 {right_label_input} 항목명]** 칸을 더블클릭하여 변경한 뒤, 아래 **[💾 일괄 영구 저장]** 버튼을 누르면 영구 보존됩니다.")
+# 친절하고 직관적인 실무 안내 문구
+st.info(f"💡 **표 편집 안내:** 엑셀처럼 아래 표에서 **[매칭 {right_label_input} 항목명]** 칸을 더블클릭하면 원하는 계정을 바로 선택하여 변경할 수 있습니다. 변경 후 우측 하단의 **[💾 일괄 영구 저장]**을 누르면 안전하게 보존됩니다.")
 
 target_column_title = f"매칭 {right_label_input} 항목명"
 
+# ★ 핵심 개선: 표 높이를 480px -> 760px로 대폭 확장하여 한눈에 20개 행 이상 시원하게 표시
 edited_df = st.data_editor(
     display_df,
     use_container_width=True,
-    height=480,
+    height=760,
     hide_index=True,
     key=f"editor_{curr_project_id}",
     column_config={
@@ -881,7 +881,7 @@ edited_df = st.data_editor(
         ),
         target_column_title: st.column_config.SelectboxColumn(
             f"매칭 {right_label_input} 항목명 (더블클릭)",
-            help="클릭하여 대조할 재단 계정을 변경할 수 있습니다.",
+            help="더블클릭하여 대조할 재단 계정을 변경할 수 있습니다.",
             options=target_options,
             required=True,
             width=210
