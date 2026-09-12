@@ -35,11 +35,10 @@ def init_db():
         )
     """)
     
-    # 계정과목 매칭 규칙 영구 저장 테이블 (누적 학습)
+    # 계정과목 매칭 규칙 영구 저장 테이블 (과목명 기준)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS account_mappings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            school_code TEXT,
             school_name TEXT NOT NULL,
             foundation_name TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -90,16 +89,15 @@ def save_mapping_rules(mapping_list):
     cursor = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     for item in mapping_list:
-        school_code = item.get("school_code", "")
         school_name = item.get("school_name", "")
         foundation_name = item.get("foundation_name", "")
         if school_name and foundation_name:
             cursor.execute("""
-                INSERT INTO account_mappings (school_code, school_name, foundation_name, updated_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO account_mappings (school_name, foundation_name, updated_at)
+                VALUES (?, ?, ?)
                 ON CONFLICT(school_name, foundation_name) 
-                DO UPDATE SET school_code=excluded.school_code, updated_at=excluded.updated_at
-            """, (school_code, school_name, foundation_name, now))
+                DO UPDATE SET updated_at=excluded.updated_at
+            """, (school_name, foundation_name, now))
     conn.commit()
     conn.close()
 
@@ -141,7 +139,7 @@ with st.sidebar:
 # 4. 메인 화면 로직
 # ==========================================
 st.title("📊 대학-사학진흥재단 결산서 스마트 검증기")
-st.markdown("학교 자체 결산서와 사학진흥재단 제출 양식을 대조하여 입력 오류와 차액을 자동으로 검증합니다.")
+st.markdown("학교 자체 결산서와 사학진흥재단 제출 양식을 대조하여 계정별 입력 오류와 차액을 자동으로 검증합니다.")
 
 if not selected_project_name:
     st.warning("👈 왼쪽 사이드바에서 프로젝트를 생성하거나 선택해 주세요.")
@@ -156,7 +154,7 @@ if "foundation_df" not in st.session_state:
     st.session_state.foundation_df = None
 
 # ----------------------------------------------------
-# 1단계: 엑셀 파일 업로드 및 시트 선택
+# 1단계: 엑셀 파일 업로드 및 시트 지정
 # ----------------------------------------------------
 st.subheader("1단계: 결산서 엑셀 파일 업로드 및 시트 지정")
 col1, col2 = st.columns(2)
@@ -194,24 +192,23 @@ if st.session_state.school_df is not None and st.session_state.foundation_df is 
     st.divider()
     
     # ----------------------------------------------------
-    # 2단계: 기준 열(Column) 지정
+    # 2단계: 기준 열(Column) 지정 (계정코드 제외, 계정과목명만 지정)
     # ----------------------------------------------------
     st.subheader("2단계: 대조할 열(Column) 설정")
     
     col_c1, col_c2 = st.columns(2)
     with col_c1:
-        st.markdown("**[학교 결산서 열 설정]**")
+        st.markdown("**[학교 결산서]**")
         school_cols = list(st.session_state.school_df.columns)
-        s_code_col = st.selectbox("계정코드 열", school_cols, index=0)
-        s_name_col = st.selectbox("계정과목명 열", school_cols, index=min(1, len(school_cols)-1))
+        s_name_col = st.selectbox("학교 계정과목명 열", school_cols, index=0)
         
     with col_c2:
-        st.markdown("**[사학진흥재단 양식 열 설정]**")
+        st.markdown("**[사학진흥재단 양식]**")
         found_cols = list(st.session_state.foundation_df.columns)
-        f_name_col = st.selectbox("계정과목명 열 (재단)", found_cols, index=0)
+        f_name_col = st.selectbox("재단 계정과목명 열", found_cols, index=0)
 
-    st.markdown("**[비교할 금액 열(Column) 선택]**")
-    st.caption("예산액, 결산액 등 비교가 필요한 열들을 각각 짝지어 선택해 주세요.")
+    st.markdown("**[비교할 금액 열(Column) 짝짓기]**")
+    st.caption("예산액, 결산액 등 비교할 금액 열들을 각각 선택해 주세요.")
     
     amount_col_count = st.number_input("비교할 금액 열 개수", min_value=1, max_value=5, value=1)
     matched_amount_cols = []
@@ -219,9 +216,9 @@ if st.session_state.school_df is not None and st.session_state.foundation_df is 
     for i in range(amount_col_count):
         ac1, ac2 = st.columns(2)
         with ac1:
-            s_amt = st.selectbox(f"금액 열 #{i+1} (학교)", school_cols, key=f"s_amt_{i}")
+            s_amt = st.selectbox(f"금액 열 #{i+1} (학교 결산서)", school_cols, key=f"s_amt_{i}")
         with ac2:
-            f_amt = st.selectbox(f"금액 열 #{i+1} (재단)", found_cols, key=f"f_amt_{i}")
+            f_amt = st.selectbox(f"금액 열 #{i+1} (재단 양식)", found_cols, key=f"f_amt_{i}")
         matched_amount_cols.append((s_amt, f_amt))
         
     st.divider()
@@ -237,29 +234,24 @@ if st.session_state.school_df is not None and st.session_state.foundation_df is 
     f_df_clean = st.session_state.foundation_df.dropna(subset=[f_name_col]).copy()
     
     s_df_clean[s_name_col] = s_df_clean[s_name_col].astype(str).str.strip()
-    s_df_clean[s_code_col] = s_df_clean[s_code_col].astype(str).str.strip()
     f_df_clean[f_name_col] = f_df_clean[f_name_col].astype(str).str.strip()
     
     foundation_unique_names = ["(매칭 제외)"] + sorted(f_df_clean[f_name_col].unique().tolist())
     saved_history = get_saved_mappings()
     
     # 고유 학교 계정과목 목록 추출
-    unique_school_accounts = s_df_clean[[s_code_col, s_name_col]].drop_duplicates().to_dict('records')
+    unique_school_accounts = sorted(s_df_clean[s_name_col].unique().tolist())
     
     mapping_form_data = []
     st.write("아래 매칭 결과를 확인하시고, 필요한 경우 드롭다운을 열어 직접 변경해 주세요:")
     
     with st.expander("🔍 계정과목 매칭 테이블 펼치기 / 접기", expanded=True):
-        m_head1, m_head2, m_head3, m_head4 = st.columns([1.5, 2.5, 3, 1.5])
-        m_head1.markdown("**학교 계정코드**")
-        m_head2.markdown("**학교 계정과목명**")
-        m_head3.markdown("**매칭할 사학진흥재단 계정명**")
-        m_head4.markdown("**매칭 판정**")
+        m_head1, m_head2, m_head3 = st.columns([3, 3, 1.5])
+        m_head1.markdown("**학교 계정과목명**")
+        m_head2.markdown("**매칭할 사학진흥재단 계정명**")
+        m_head3.markdown("**매칭 판정**")
 
-        for idx, row in enumerate(unique_school_accounts):
-            code_val = row[s_code_col]
-            name_val = row[s_name_col]
-            
+        for idx, name_val in enumerate(unique_school_accounts):
             # 매칭 우선순위 판단
             selected_match = "(매칭 제외)"
             status_text = "미매칭"
@@ -277,22 +269,20 @@ if st.session_state.school_df is not None and st.session_state.foundation_df is 
                     selected_match = candidates[0]
                     status_text = "🤖 AI추천"
 
-            col_m1, col_m2, col_m3, col_m4 = st.columns([1.5, 2.5, 3, 1.5])
-            col_m1.text(code_val)
-            col_m2.text(name_val)
+            col_m1, col_m2, col_m3 = st.columns([3, 3, 1.5])
+            col_m1.text(name_val)
             
             default_index = foundation_unique_names.index(selected_match) if selected_match in foundation_unique_names else 0
-            user_choice = col_m3.selectbox(
+            user_choice = col_m2.selectbox(
                 f"선택_{idx}", 
                 foundation_unique_names, 
                 index=default_index, 
                 key=f"match_select_{idx}",
                 label_visibility="collapsed"
             )
-            col_m4.caption(status_text)
+            col_m3.caption(status_text)
             
             mapping_form_data.append({
-                "school_code": code_val,
                 "school_name": name_val,
                 "foundation_name": user_choice
             })
@@ -339,12 +329,10 @@ if st.session_state.school_df is not None and st.session_state.foundation_df is 
     
     result_rows = []
     for _, row in s_grouped.iterrows():
-        sch_code = row[s_code_col]
         sch_name = row[s_name_col]
         fd_name = row["__matched_foundation_name"]
         
         row_res = {
-            "학교 계정코드": sch_code,
             "학교 계정과목명": sch_name,
             "매칭 재단 계정명": fd_name if fd_name else "(미매칭)"
         }
@@ -403,7 +391,6 @@ if st.session_state.school_df is not None and st.session_state.foundation_df is 
     st.divider()
     st.subheader("5단계: 검증 결과 엑셀 다운로드")
     
-    # 엑셀 파일 생성 메모리 버퍼
     excel_buffer = io.BytesIO()
     with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
         result_df.to_excel(writer, index=False, sheet_name="검증결과리포트")
