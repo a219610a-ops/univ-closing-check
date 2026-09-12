@@ -59,7 +59,16 @@ st.markdown("""
         border-radius: 6px;
         margin-bottom: 14px;
     }
-    /* 카드 제목 클릭 버튼 스타일: 굵고 큰 제목처럼 표시 */
+    .total-banner {
+        background-color: #EFF6FF;
+        border: 1px solid #BFDBFE;
+        border-radius: 8px;
+        padding: 10px 16px;
+        margin-bottom: 12px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
     div.title-link-container > button {
         background: none !important;
         border: none !important;
@@ -86,7 +95,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. SQLite DB 초기화 (회계연도 fiscal_year 지원)
+# 2. SQLite DB 초기화 및 관리 함수
 # ==========================================
 def get_db_connection():
     conn = sqlite3.connect("accounting_audit.db", check_same_thread=False)
@@ -129,12 +138,12 @@ def init_db():
         )
     """)
     
-    # 2) 기부금 수입 테이블 (fiscal_year 포함)
+    # 2) 기부금 수입 테이블
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS donation_receipts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entity_type TEXT NOT NULL, -- 'UNIVERSITY' or 'FOUNDATION'
-            fiscal_year INTEGER NOT NULL, -- 회계연도 (예: 2026, 2025)
+            entity_type TEXT NOT NULL,
+            fiscal_year INTEGER NOT NULL,
             donation_date TEXT NOT NULL,
             budget_subject TEXT NOT NULL,
             purpose TEXT NOT NULL,
@@ -153,7 +162,7 @@ def init_db():
         )
     """)
     
-    # 3) 기부금 지출 테이블 (fiscal_year 포함)
+    # 3) 기부금 지출 테이블
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS donation_expenses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -170,25 +179,6 @@ def init_db():
             FOREIGN KEY (receipt_id) REFERENCES donation_receipts(id) ON DELETE CASCADE
         )
     """)
-
-    # 기존 DB 컬럼 호환성 점검 및 자동 보정
-    cursor.execute("PRAGMA table_info(donation_receipts)")
-    r_cols = [c[1] for c in cursor.fetchall()]
-    if "fiscal_year" not in r_cols:
-        try:
-            current_y = datetime.now().year
-            cursor.execute(f"ALTER TABLE donation_receipts ADD COLUMN fiscal_year INTEGER DEFAULT {current_y}")
-        except Exception:
-            pass
-
-    cursor.execute("PRAGMA table_info(donation_expenses)")
-    e_cols = [c[1] for c in cursor.fetchall()]
-    if "fiscal_year" not in e_cols:
-        try:
-            current_y = datetime.now().year
-            cursor.execute(f"ALTER TABLE donation_expenses ADD COLUMN fiscal_year INTEGER DEFAULT {current_y}")
-        except Exception:
-            pass
 
     conn.commit()
     conn.close()
@@ -210,7 +200,6 @@ def simple_encrypt(raw_text):
         return ""
     return hashlib.sha256(raw_text.encode('utf-8')).hexdigest()
 
-# 회계연도 기반 발급번호 자동 채번 (예: 2026년 -> 26-01)
 def generate_receipt_no(entity_type, fiscal_year):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -233,7 +222,6 @@ def generate_receipt_no(entity_type, fiscal_year):
         new_seq = 1
     return f"{yy}-{new_seq:02d}"
 
-# 등록된 회계연도 목록 조회
 def get_existing_fiscal_years(entity_type):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -248,6 +236,16 @@ def get_existing_fiscal_years(entity_type):
         years.append(now_year - 1)
     return sorted(list(set(years)), reverse=True)
 
+# 기부금 수입 삭제 함수
+def delete_donation_receipt(receipt_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    # 외래키 제약조건에 따라 연결된 지출도 함께 삭제
+    cursor.execute("DELETE FROM donation_expenses WHERE receipt_id = ?", (receipt_id,))
+    cursor.execute("DELETE FROM donation_receipts WHERE id = ?", (receipt_id,))
+    conn.commit()
+    conn.close()
+
 # ==========================================
 # 3. 글로벌 세션 상태 및 상단 미니 메뉴바
 # ==========================================
@@ -260,7 +258,6 @@ if "selected_receipt_id_for_expense" not in st.session_state:
 if "fiscal_year" not in st.session_state:
     st.session_state.fiscal_year = datetime.now().year
 
-# 상단 얇은 미니 메뉴바
 m_col1, m_col2, m_col3, m_col4 = st.columns([3.5, 1.2, 1.6, 1.4])
 with m_col1:
     st.markdown("<h4 style='margin:0; color:#0F172A;'>🏛️ 대학 행정 스마트 통합 포털</h4>", unsafe_allow_html=True)
@@ -295,7 +292,6 @@ if st.session_state.current_page == "HOME":
     st.markdown("#### 📂 주요 업무 시스템 바로가기")
     c_card1, c_card2 = st.columns(2)
     
-    # 1번 카드: 결산 데이터 스마트 검증기
     with c_card1:
         with st.container(border=True):
             st.markdown('<div class="title-link-container">', unsafe_allow_html=True)
@@ -311,7 +307,6 @@ if st.session_state.current_page == "HOME":
             * 엑셀형 대용량 스프레드시트 인라인 편집 및 DB 영구 보존
             """)
 
-    # 2번 카드: 기부금 관리 시스템
     with c_card2:
         with st.container(border=True):
             st.markdown('<div class="title-link-container">', unsafe_allow_html=True)
@@ -324,7 +319,7 @@ if st.session_state.current_page == "HOME":
             st.markdown("""
             * **회계연도별 독립 관리** (2026, 2025 등 연도별 분리 정산)
             * 대학 회계 / 법인 회계 작업 환경 완벽 분리 선택
-            * 수입 건 하단에서 바로 지출(수혜)을 등록하는 1:1 매핑 관리
+            * 수입 건 삭제 관리 및 실시간 수입 합계 확인
             * 국세청 법정 기부금영수증 & 용도별 집행 정산표 엑셀 다운로드
             """)
 
@@ -349,7 +344,7 @@ elif st.session_state.current_page == "DONATION_SELECT":
             st.markdown("""
             * 회계연도별(3월~익년 2월) 기부금 수입 및 학생 장학/학과 지출 관리
             * 장학기금, 학과발전기금, 시설확충기금 등 교비 기부금 전용
-            * 수입 등록 직후 하단에서 수혜자 대상 지출 즉시 등록
+            * 수입 등록·삭제 관리 및 수입 합계 실시간 결산
             * 국세청 법정 영수증(코드 10) 및 용도별 정산표 엑셀 다운로드
             """)
 
@@ -370,20 +365,18 @@ elif st.session_state.current_page == "DONATION_SELECT":
             """)
 
 # ==========================================
-# PAGE 3: 🎁 기부금 관리 - 독립 작업 화면 (회계연도 완벽 분리)
+# PAGE 3: 🎁 기부금 관리 - 독립 작업 화면 (수입 삭제 및 합계 탑재)
 # ==========================================
 elif st.session_state.current_page == "DONATION_WORKSPACE":
     current_entity = st.session_state.selected_entity or "UNIVERSITY"
     entity_label = "🏫 대학 회계" if current_entity == "UNIVERSITY" else "🏛️ 법인 회계"
     
-    # 1. 상단 바: 회계 타이틀 + 회계연도 선택기 + 전환 버튼
     top_c1, top_c2, top_c3 = st.columns([3, 1.8, 1.2])
     with top_c1:
         st.markdown(f'<div class="main-app-title">🎁 기부금 관리 시스템 [{entity_label}]</div>', unsafe_allow_html=True)
-        st.markdown('<div class="main-app-caption">회계연도별 기부금 수입·지출 등록 및 1:1 매핑 정산을 안전하게 처리합니다.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="main-app-caption">기부금 수입 등록·삭제, 지출 매핑 및 회계연도별 합계 결산을 수행합니다.</div>', unsafe_allow_html=True)
 
     with top_c2:
-        # ★ 회계연도 선택 및 추가 드롭다운
         available_years = get_existing_fiscal_years(current_entity)
         if st.session_state.fiscal_year not in available_years:
             st.session_state.fiscal_year = available_years[0]
@@ -406,7 +399,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
 
     current_year = st.session_state.fiscal_year
 
-    # 회계연도 추가 팝오버
     with st.popover("➕ 새 회계연도 추가"):
         new_year_input = st.number_input("추가할 회계연도 입력 (4자리)", min_value=2000, max_value=2099, value=current_year + 1)
         if st.button("회계연도 추가 및 전환", use_container_width=True, type="primary"):
@@ -414,7 +406,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             st.success(f"{new_year_input} 회계연도로 전환되었습니다.")
             st.rerun()
 
-    # 2. 해당 회계 + 해당 회계연도 데이터만 로드
+    # 데이터 로드
     conn = get_db_connection()
     receipts_df = pd.read_sql_query("""
         SELECT * FROM donation_receipts 
@@ -433,12 +425,11 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
     total_expense = expenses_df['amount'].sum() if not expenses_df.empty else 0.0
     balance = total_income - total_expense
 
-    # KPI 대시보드 (선택된 회계연도 기준)
     k1, k2, k3, k4 = st.columns(4)
-    k1.markdown(f"""<div class="kpi-card"><div style="color:#64748B; font-size:11.5px; font-weight:600;">{current_year}년 총 수입액</div><div class="kpi-val" style="color:#2563EB;">{total_income:,.0f} 원</div></div>""", unsafe_allow_html=True)
+    k1.markdown(f"""<div class="kpi-card"><div style="color:#64748B; font-size:11.5px; font-weight:600;">{current_year}년 총 수입 합계</div><div class="kpi-val" style="color:#2563EB;">{total_income:,.0f} 원</div></div>""", unsafe_allow_html=True)
     k2.markdown(f"""<div class="kpi-card"><div style="color:#64748B; font-size:11.5px; font-weight:600;">{current_year}년 총 지출액</div><div class="kpi-val" style="color:#DC2626;">{total_expense:,.0f} 원</div></div>""", unsafe_allow_html=True)
     k3.markdown(f"""<div class="kpi-card"><div style="color:#64748B; font-size:11.5px; font-weight:600;">{current_year}년 집행 잔액</div><div class="kpi-val" style="color:#059669;">{balance:,.0f} 원</div></div>""", unsafe_allow_html=True)
-    k4.markdown(f"""<div class="kpi-card"><div style="color:#64748B; font-size:11.5px; font-weight:600;">영수증 발급 건수</div><div class="kpi-val" style="color:#0F172A;">{len(receipts_df)} 건</div></div>""", unsafe_allow_html=True)
+    k4.markdown(f"""<div class="kpi-card"><div style="color:#64748B; font-size:11.5px; font-weight:600;">수입 등록 건수</div><div class="kpi-val" style="color:#0F172A;">{len(receipts_df)} 건</div></div>""", unsafe_allow_html=True)
 
     if current_entity == "FOUNDATION":
         stat_inc = receipts_df[receipts_df['is_statutory_transfer'] == 1]['amount'].sum() if not receipts_df.empty else 0.0
@@ -455,12 +446,12 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
     st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
 
     tab_manage, tab_reports = st.tabs([
-        f"📥 [{current_year} 회계연도] 기부금 수입 및 지출 원스톱 관리", 
+        f"📥 [{current_year} 회계연도] 기부금 수입·삭제 및 지출 관리", 
         f"📊 [{current_year} 회계연도] 용도별 집행 정산표 및 서식 출력"
     ])
 
     # ----------------------------------------------------
-    # TAB 1: 수입 등록 + 하단 지출 등록 (해당 회계연도 자동 귀속)
+    # TAB 1: 기부금 수입 등록 + 수입 삭제 + 수입 합계 배너
     # ----------------------------------------------------
     with tab_manage:
         with st.expander(f"➕ 새 기부금 수입 등록 ({current_year} 회계연도)", expanded=True):
@@ -481,7 +472,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                 st.markdown("##### 2. 식별번호 및 기부 명세")
                 f4, f5, f6 = st.columns(3)
                 with f4:
-                    raw_id_no = st.text_input("주민등록번호 / 사업자번호", placeholder="예: 900101-1234567", type="password", help="보안을 위해 화면 마스킹 및 암호화 저장됩니다.", key=f"rid_{current_year}")
+                    raw_id_no = st.text_input("주민등록번호 / 사업자번호", placeholder="예: [RRN Omitted]", type="password", help="보안을 위해 화면 마스킹 및 암호화 저장됩니다.", key=f"rid_{current_year}")
                 with f5:
                     d_type = st.selectbox("기부 내용 구분", ["금전", "현물"], key=f"dt_{current_year}")
                     d_code = st.text_input("구분 코드 (법정 서식)", value="10", key=f"dc_{current_year}")
@@ -534,8 +525,22 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     else:
                         st.warning("기부자 성명과 금액을 올바르게 입력해 주세요.")
 
-        st.markdown(f"##### 📋 [{current_year} 회계연도] 기부금 수입 내역")
+        # 수입 대장 헤더 및 수입 합계 배너
+        st.markdown(f"##### 📋 [{current_year} 회계연도] 기부금 수입 대장 및 관리")
         
+        # ★ 수입 합계 요약 배너 표시
+        st.markdown(f"""
+        <div class="total-banner">
+            <div>
+                <span style="font-size:14px; font-weight:700; color:#1E3A8A;">📊 {current_year} 회계연도 수입 집계:</span>
+                <span style="font-size:13.5px; color:#475569; margin-left:8px;">총 <b>{len(receipts_df)}</b> 건 등록</span>
+            </div>
+            <div>
+                <span style="font-size:15px; font-weight:700; color:#1D4ED8;">수입 합계: {total_income:,.0f} 원</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
         exp_totals = {}
         if not expenses_df.empty:
             for r_id, grp in expenses_df.groupby('receipt_id'):
@@ -554,8 +559,9 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     "기부일자": r['donation_date'],
                     "기부자명": r['donor_name'],
                     "식별번호": r['id_number_masked'],
+                    "예산과목": r['budget_subject'],
                     "사용용도": r['purpose'],
-                    "기부금액(원)": int(round(orig_a)),
+                    "기부수입액(원)": int(round(orig_a)),
                     "지출누계(원)": int(round(used_a)),
                     "남은잔액(원)": int(round(rem_a))
                 })
@@ -564,30 +570,51 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             if st.session_state.selected_receipt_id_for_expense not in summary_table_df['수입ID'].values:
                 st.session_state.selected_receipt_id_for_expense = int(summary_table_df.iloc[0]['수입ID'])
 
-            sel_r_id = st.selectbox(
-                f"👇 [{current_year}년] 지출을 등록할 기부금 건을 선택하세요:",
-                summary_table_df['수입ID'].tolist(),
-                index=summary_table_df['수입ID'].tolist().index(st.session_state.selected_receipt_id_for_expense),
-                format_func=lambda x: f"[{summary_table_df[summary_table_df['수입ID']==x]['발급번호'].values[0]}] {summary_table_df[summary_table_df['수입ID']==x]['기부자명'].values[0]} 님 | 용도: {summary_table_df[summary_table_df['수입ID']==x]['사용용도'].values[0]} | 기부액: {summary_table_df[summary_table_df['수입ID']==x]['기부금액(원)'].values[0]:,}원 (잔액: {summary_table_df[summary_table_df['수입ID']==x]['남은잔액(원)'].values[0]:,}원)",
-                key=f"sel_r_{current_year}"
-            )
-            st.session_state.selected_receipt_id_for_expense = sel_r_id
-
+            # 기부금 수입 대장 테이블
             st.dataframe(
                 summary_table_df.drop(columns=['수입ID']),
                 use_container_width=True,
                 height=240
             )
 
+            # ★ 수입 건 선택 및 삭제 관리 컨트롤 영역
+            ctrl_c1, ctrl_c2 = st.columns([3.5, 1.5])
+            with ctrl_c1:
+                sel_r_id = st.selectbox(
+                    f"👇 [{current_year}년] 지출 입력 또는 관리할 기부금 건 선택:",
+                    summary_table_df['수입ID'].tolist(),
+                    index=summary_table_df['수입ID'].tolist().index(st.session_state.selected_receipt_id_for_expense),
+                    format_func=lambda x: f"[{summary_table_df[summary_table_df['수입ID']==x]['발급번호'].values[0]}] {summary_table_df[summary_table_df['수입ID']==x]['기부자명'].values[0]} 님 | {summary_table_df[summary_table_df['수입ID']==x]['사용용도'].values[0]} | 수입: {summary_table_df[summary_table_df['수입ID']==x]['기부수입액(원)'].values[0]:,}원 (잔액: {summary_table_df[summary_table_df['수입ID']==x]['남은잔액(원)'].values[0]:,}원)",
+                    key=f"sel_r_{current_year}"
+                )
+                st.session_state.selected_receipt_id_for_expense = sel_r_id
+
+            with ctrl_c2:
+                st.markdown("<div style='height:25px;'></div>", unsafe_allow_html=True)
+                # ★ 수입 내역 삭제 팝오버 버튼
+                target_del_row = summary_table_df[summary_table_df['수입ID'] == sel_r_id].iloc[0]
+                with st.popover(f"🗑️ 선택 건 삭제", help="선택한 기부금 수입 건을 삭제합니다."):
+                    st.markdown(f"**[{target_del_row['기부자명']}] 님의 수입 내역 삭제**")
+                    st.caption(f"발급번호: {target_del_row['발급번호']} | 금액: {target_del_row['기부수입액(원)']:,}원")
+                    st.warning("⚠️ 삭제 시 해당 기부금에서 집행된 지출 내역도 함께 삭제됩니다.")
+                    if st.button("확인 및 영구 삭제", key=f"confirm_del_rec_{sel_r_id}", type="primary", use_container_width=True):
+                        delete_donation_receipt(sel_r_id)
+                        st.session_state.selected_receipt_id_for_expense = None
+                        st.success("수입 내역이 삭제되었습니다.")
+                        st.rerun()
+
             curr_target_row = summary_table_df[summary_table_df['수입ID'] == sel_r_id].iloc[0]
             curr_rem_amt = int(curr_target_row['남은잔액(원)'])
 
+            # ----------------------------------------------------
+            # 하단: 선택된 기부금 건에 대한 지출(수혜) 입력 파트
+            # ----------------------------------------------------
             st.markdown("---")
             st.markdown(f"#### 📤 [{current_year}년 {curr_target_row['기부자명']} 님의 기부금] 에서 지출(수혜) 내용 등록")
             st.markdown(f"""
             <div class="sub-box">
                 <b>선택된 기부금:</b> {curr_target_row['기부자명']} 님 (발급번호: {curr_target_row['발급번호']} / 사용용도: {curr_target_row['사용용도']})<br>
-                <b>기부 원본액:</b> {curr_target_row['기부금액(원)']:,} 원 &nbsp;|&nbsp; 
+                <b>기부 원본액:</b> {curr_target_row['기부수입액(원)']:,} 원 &nbsp;|&nbsp; 
                 <b>현재 남은 집행 잔액:</b> <span style="color:#059669; font-weight:700;">{curr_rem_amt:,} 원</span>
             </div>
             """, unsafe_allow_html=True)
@@ -642,7 +669,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             else:
                 st.caption(f"아직 {curr_target_row['기부자명']} 님의 기부금에서 집행된 지출 내역이 없습니다.")
 
-            # 수입-지출 1:1 매핑 통합 원장 엑셀 다운로드 (회계연도 포함)
+            # 수입-지출 매핑 대장 엑셀 다운로드
             st.markdown("---")
             st.markdown(f"##### 📥 [{current_year} 회계연도] 수입-지출 1:1 매핑 종합 대장 엑셀 다운로드")
             
@@ -700,7 +727,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             st.info(f"{current_year} 회계연도에 등록된 기부금 수입이 없습니다. 상단에서 기부금을 먼저 등록해 주세요.")
 
     # ----------------------------------------------------
-    # TAB 2: 용도별 집행 정산표 & 국세청 서식 (해당 회계연도 기준)
+    # TAB 2: 용도별 집행 정산표 & 국세청 서식 (엑셀 다운로드 포함)
     # ----------------------------------------------------
     with tab_reports:
         st.markdown(f"#### 1. 📊 [{current_year} 회계연도] 사용 용도별 집행 정산표")
