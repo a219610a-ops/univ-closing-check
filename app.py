@@ -425,7 +425,6 @@ with h_col1:
 with h_col2:
     if st.button("🔄 데이터 초기화", use_container_width=True):
         reset_workspace_data(curr_project_id)
-        # 매칭 오버라이드 세션 정리
         for k in list(st.session_state.keys()):
             if k.startswith(f"match_override_{curr_project_id}_"):
                 del st.session_state[k]
@@ -646,7 +645,6 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# 슬림 4개 메트릭 바
 m1, m2, m3, m4 = st.columns(4)
 m1.markdown(f"""<div class="kpi-card"><div style="color: #64748B; font-size:11.5px; font-weight:600;">전체 검증 항목</div><div class="kpi-val" style="color: #0F172A;">{total_items}건</div></div>""", unsafe_allow_html=True)
 m2.markdown(f"""<div class="kpi-card" style="border-color: #A7F3D0; background-color: #F0FDF4;"><div style="color: #059669; font-size:11.5px; font-weight:600;">정상 일치</div><div class="kpi-val" style="color: #059669;">{match_items}건 <span style="font-size:12px;">({(match_items/total_items*100 if total_items else 0):.1f}%)</span></div></div>""", unsafe_allow_html=True)
@@ -656,7 +654,7 @@ m4.markdown(f"""<div class="kpi-card" style="border-color: #FDE68A; background-c
 st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
 
 # ----------------------------------------------------
-# 5단계: 📑 엑셀형 인터랙티브 스마트 시트 (인라인 편집 가능)
+# 5단계: 📑 엑셀형 인터랙티브 스마트 시트 (인라인 편집 & 천 단위 쉼표 서식)
 # ----------------------------------------------------
 ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1.8, 1.2])
 
@@ -672,7 +670,6 @@ with ctrl_col2:
 
 with ctrl_col3:
     st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-    # 엑셀 다운로드 버튼
     export_buffer = io.BytesIO()
     with pd.ExcelWriter(export_buffer, engine='openpyxl') as writer:
         res_df.to_excel(writer, index=False, sheet_name="검증결과리포트")
@@ -687,7 +684,6 @@ with ctrl_col3:
         use_container_width=True
     )
 
-# 필터링 적용
 display_df = res_df.copy()
 if filter_choice == "❌ 차액 오류만":
     display_df = display_df[display_df["상태"] == "❌ 오류"]
@@ -704,7 +700,7 @@ st.info(f"💡 **인라인 편집 안내:** 아래 표에서 **[매칭 {right_la
 
 target_column_title = f"매칭 {right_label_input} 항목명"
 
-# 인터랙티브 스프레드시트 렌더링
+# ★ 핵심 개선: 천 단위 구분 쉼표(%,d) 적용
 edited_df = st.data_editor(
     display_df,
     use_container_width=True,
@@ -713,7 +709,11 @@ edited_df = st.data_editor(
     column_config={
         "상태": st.column_config.TextColumn("검증 상태", width="small", disabled=True),
         f"{left_label_input} 항목명": st.column_config.TextColumn(f"{left_label_input} 항목명 (기준)", width="medium", disabled=True),
-        f"{left_label_input} 결산액": st.column_config.NumberColumn(f"{left_label_input} 금액 (원)", format="%d", disabled=True),
+        f"{left_label_input} 결산액": st.column_config.NumberColumn(
+            f"{left_label_input} 금액 (원)", 
+            format="%,d", 
+            disabled=True
+        ),
         target_column_title: st.column_config.SelectboxColumn(
             f"매칭 {right_label_input} 항목명 (더블클릭 변경)",
             help="클릭하여 대조할 재단 계정을 변경할 수 있습니다.",
@@ -721,8 +721,16 @@ edited_df = st.data_editor(
             required=True,
             width="large"
         ),
-        f"{right_label_input} 결산액": st.column_config.NumberColumn(f"{right_label_input} 금액 (원)", format="%d", disabled=True),
-        "차액": st.column_config.NumberColumn("차액 (결산-대조)", format="%+d", disabled=True),
+        f"{right_label_input} 결산액": st.column_config.NumberColumn(
+            f"{right_label_input} 금액 (원)", 
+            format="%,d", 
+            disabled=True
+        ),
+        "차액": st.column_config.NumberColumn(
+            "차액 (결산-대조)", 
+            format="%,d", 
+            disabled=True
+        ),
         "AI 추천 힌트": st.column_config.TextColumn("AI 추천 힌트", width="medium", disabled=True),
         "매칭유형": st.column_config.TextColumn("유형", width="small", disabled=True)
     }
@@ -739,7 +747,6 @@ with save_col2:
             t_name = row[target_column_title]
             safe_key = f"match_override_{curr_project_id}_{re.sub(r'[^a-zA-Z0-9가-힣]', '_', s_name)}"
             
-            # 이전 값과 달라졌으면 세션 및 DB 업데이트
             if st.session_state.get(safe_key) != t_name:
                 st.session_state[safe_key] = t_name
                 batch_to_save[s_name] = t_name
