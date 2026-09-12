@@ -9,7 +9,7 @@ import hashlib
 from datetime import datetime
 
 # ==========================================
-# 1. 페이지 기본 설정 및 스타일링
+# 1. 페이지 기본 설정 및 디자인 스타일링
 # ==========================================
 st.set_page_config(
     page_title="대학 행정 스마트 통합 포털",
@@ -59,15 +59,29 @@ st.markdown("""
         border-radius: 6px;
         margin-bottom: 14px;
     }
-    /* 카드 제목 클릭 버튼 스타일: 굵고 큰 제목처럼 표시 */
-    div.title-click-btn > button {
+
+    /* ★ 빨간 박스 없는 순수 텍스트 링크형 제목 버튼 */
+    div.title-link-container > button {
+        background: none !important;
+        border: none !important;
+        padding: 0px !important;
+        margin: 0px !important;
+        color: #1E293B !important;
         font-size: 18px !important;
         font-weight: 700 !important;
         text-align: left !important;
-        padding: 6px 12px !important;
-        border-radius: 8px !important;
-        display: flex !important;
-        justify-content: flex-start !important;
+        box-shadow: none !important;
+        cursor: pointer !important;
+        display: inline-block !important;
+    }
+    div.title-link-container > button:hover {
+        color: #2563EB !important;
+        text-decoration: underline !important;
+        background: none !important;
+    }
+    div.title-link-container > button:focus {
+        box-shadow: none !important;
+        background: none !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -228,7 +242,7 @@ with m_col4:
 st.markdown("<hr style='margin-top:6px; margin-bottom:18px; border-color:#E2E8F0;'>", unsafe_allow_html=True)
 
 # ==========================================
-# PAGE 1: 🏠 홈 대시보드 (제목 클릭 이동 반영)
+# PAGE 1: 🏠 홈 대시보드 (빨간 박스 제거 & 기존 카드 형태 유지)
 # ==========================================
 if st.session_state.current_page == "HOME":
     st.markdown("""
@@ -243,11 +257,12 @@ if st.session_state.current_page == "HOME":
     st.markdown("#### 📂 주요 업무 시스템 바로가기")
     c_card1, c_card2 = st.columns(2)
     
-    # 1번 카드: 결산 데이터 스마트 검증기 (제목 클릭 방식)
+    # 1번 카드: 결산 데이터 스마트 검증기
     with c_card1:
         with st.container(border=True):
-            st.markdown('<div class="title-click-btn">', unsafe_allow_html=True)
-            if st.button("📊 결산 데이터 스마트 검증기 ➔", key="title_click_closing", use_container_width=True, type="primary"):
+            # 빨간 박스 없는 순수 텍스트 링크형 제목
+            st.markdown('<div class="title-link-container">', unsafe_allow_html=True)
+            if st.button("📊 결산 데이터 스마트 검증기 ➔", key="title_link_closing"):
                 st.session_state.current_page = "CLOSING"
                 st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
@@ -259,11 +274,12 @@ if st.session_state.current_page == "HOME":
             * 엑셀형 대용량 스프레드시트 인라인 편집 및 DB 영구 보존
             """)
 
-    # 2번 카드: 기부금 관리 시스템 (제목 클릭 방식)
+    # 2번 카드: 기부금 관리 시스템
     with c_card2:
         with st.container(border=True):
-            st.markdown('<div class="title-click-btn">', unsafe_allow_html=True)
-            if st.button("🎁 기부금 관리 시스템 ➔", key="title_click_donation", use_container_width=True, type="primary"):
+            # 빨간 박스 없는 순수 텍스트 링크형 제목
+            st.markdown('<div class="title-link-container">', unsafe_allow_html=True)
+            if st.button("🎁 기부금 관리 시스템 ➔", key="title_link_donation"):
                 st.session_state.current_page = "DONATION_SELECT"
                 st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
@@ -276,7 +292,7 @@ if st.session_state.current_page == "HOME":
             """)
 
 # ==========================================
-# PAGE 2: 🎁 기부금 관리 - 회계 분리 선택 화면 (제목 클릭 반영)
+# PAGE 2: 🎁 기부금 관리 - 회계 분리 선택 화면
 # ==========================================
 elif st.session_state.current_page == "DONATION_SELECT":
     st.markdown('<div class="main-app-title">🎁 기부금 관리 시스템 - 회계 선택</div>', unsafe_allow_html=True)
@@ -285,8 +301,8 @@ elif st.session_state.current_page == "DONATION_SELECT":
     e_col1, e_col2 = st.columns(2)
     with e_col1:
         with st.container(border=True):
-            st.markdown('<div class="title-click-btn">', unsafe_allow_html=True)
-            if st.button("🏫 대학 회계 기부금 관리 ➔", key="title_click_univ", use_container_width=True, type="primary"):
+            st.markdown('<div class="title-link-container">', unsafe_allow_html=True)
+            if st.button("🏫 대학 회계 기부금 관리 ➔", key="title_link_univ"):
                 st.session_state.selected_entity = "UNIVERSITY"
                 st.session_state.current_page = "DONATION_WORKSPACE"
                 st.rerun()
@@ -301,8 +317,8 @@ elif st.session_state.current_page == "DONATION_SELECT":
 
     with e_col2:
         with st.container(border=True):
-            st.markdown('<div class="title-click-btn">', unsafe_allow_html=True)
-            if st.button("🏛️ 법인 회계 기부금 관리 ➔", key="title_click_found", use_container_width=True, type="primary"):
+            st.markdown('<div class="title-link-container">', unsafe_allow_html=True)
+            if st.button("🏛️ 법인 회계 기부금 관리 ➔", key="title_link_found"):
                 st.session_state.selected_entity = "FOUNDATION"
                 st.session_state.current_page = "DONATION_WORKSPACE"
                 st.rerun()
