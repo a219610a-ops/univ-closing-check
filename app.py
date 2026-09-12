@@ -16,7 +16,7 @@ st.set_page_config(
 )
 
 # ==========================================
-# 2. SQLite 데이터베이스 초기화 및 자동 보정
+# 2. SQLite 데이터베이스 초기화 및 관리 함수
 # ==========================================
 def get_db_connection():
     conn = sqlite3.connect("accounting_audit.db", check_same_thread=False)
@@ -204,28 +204,41 @@ def save_mapping_rules(mapping_list):
     conn.close()
 
 # ==========================================
-# 3. 고도화된 계정과목 스마트 정제 및 매칭 엔진
+# 3. 고도화된 정밀 스마트 매칭 엔진
 # ==========================================
+# 상위 집계 키워드 (오매칭 차단 목록)
+EXCLUDE_KEYWORDS = [
+    "총계", "합계", "소계", "차기이월", "전기이월", "이월자금", "수입총계", "지출총계"
+]
+
+def is_aggregate_account(name):
+    """총계, 소계 등 상위 집계 행인지 판정"""
+    for kw in EXCLUDE_KEYWORDS:
+        if kw in name:
+            return True
+    return False
+
 def clean_account_name(raw_name):
     """
-    계정과목명 앞뒤의 숫자 코드(5111, 1. 등), 기호, 괄호, 공백을 제거하여 순수 계정명만 추출
-    예: '5111 학부입학금' -> '학부입학금'
-    예: '1.학부수업료' -> '학부수업료'
+    앞뒤 코드(5111, 1., 1-1, [1] 등), 기호, 띄어쓰기를 정밀 제거하여 순수 한글명 추출
     """
     if pd.isna(raw_name):
         return ""
     text = str(raw_name).strip()
-    # 1. 앞쪽 숫자 및 기호 제거 (예: 5111, 1., 1-1., [1] 등)
     text = re.sub(r'^[0-9\.\-\_\(\)\[\]\s]+', '', text)
-    # 2. 중간의 특수문자 및 모든 공백 제거 (비교 전용 순수 텍스트)
     clean_text = re.sub(r'[\s\.\-\_\(\)\[\]]+', '', text)
     return clean_text if clean_text else text
 
 def find_smart_match(source_name, target_options, target_clean_dict, saved_history):
     """
-    순수 계정명을 분석하여 4단계 우선순위로 최적의 매칭 추천
+    신뢰도 높은 정밀 매칭 알고리즘:
+    1순위: DB 저장 이력
+    2순위: 순수 계정명 100% 완전 일치
+    3순위: 의미 있는 부분 일치 (최소 3글자 이상 일치, 상위 총계 배제)
+    4순위: 매우 엄격한 유사도 (0.75 이상)
+    * 신뢰도가 부족하면 안전하게 (매칭 제외) 반환
     """
-    # 1단계: 과거 DB 저장 이력
+    # 1단계: 사용자 또는 DB 저장 이력
     if source_name in saved_history and saved_history[source_name] in target_options:
         return saved_history[source_name], "💾 DB기억"
         
@@ -233,25 +246,31 @@ def find_smart_match(source_name, target_options, target_clean_dict, saved_histo
     if not src_clean:
         return "(매칭 제외)", "미매칭"
         
-    # 2단계: 순수 계정명 완전 일치 (예: '5113 학부수업료'의 '학부수업료' == '1.학부수업료'의 '학부수업료')
+    # 2단계: 순수 계정명 완전 일치 (상위 집계 제외)
     for raw_target, clean_target in target_clean_dict.items():
+        if is_aggregate_account(raw_target):
+            continue
         if src_clean == clean_target:
             return raw_target, "🎯 순수일치"
-            
-    # 3단계: 상호 포함 관계 (부분 일치)
-    for raw_target, clean_target in target_clean_dict.items():
-        if clean_target and (src_clean in clean_target or clean_target in src_clean):
-            return raw_target, "🔍 부분일치"
-            
-    # 4단계: 유사도 비교 (Difflib)
-    all_clean_targets = list(target_clean_dict.values())
-    matches = difflib.get_close_matches(src_clean, all_clean_targets, n=1, cutoff=0.5)
-    if matches:
-        matched_clean = matches[0]
+
+    # 3단계: 안전한 부분 일치 (핵심 글자 3자 이상, 한쪽이 다른 쪽에 완전 포함)
+    if len(src_clean) >= 3:
         for raw_target, clean_target in target_clean_dict.items():
-            if clean_target == matched_clean:
-                return raw_target, "🤖 AI추천"
+            if is_aggregate_account(raw_target):
+                continue
+            if len(clean_target) >= 3:
+                if src_clean in clean_target or clean_target in src_clean:
+                    return raw_target, "🔍 정밀포함"
+
+    # 4단계: 엄격한 유사도 검사 (cutoff를 0.75로 대폭 강화하여 엉뚱한 매칭 방지)
+    valid_targets = [raw for raw in target_options if raw != "(매칭 제외)" and not is_aggregate_account(raw)]
+    valid_clean_map = {target_clean_dict[raw]: raw for raw in valid_targets if target_clean_dict.get(raw)}
+    
+    matches = difflib.get_close_matches(src_clean, list(valid_clean_map.keys()), n=1, cutoff=0.75)
+    if matches:
+        return valid_clean_map[matches[0]], "🤖 정밀추천"
                 
+    # 엉뚱한 추천 대신 안전하게 매칭 제외로 남김
     return "(매칭 제외)", "미매칭"
 
 # ==========================================
@@ -414,9 +433,9 @@ if source_df is not None and target_df is not None:
         
     st.divider()
 
-    # 3단계: 지능형 스마트 항목 매칭 엔진
+    # 3단계: 지능형 정밀 스마트 매칭 엔진
     st.subheader("3단계: 지능형 항목 스마트 매칭")
-    st.markdown("계정코드(5111 등), 목차번호(1. 등)를 자동으로 분리·정제하여 순수 계정명 기반으로 똑똑하게 자동 매칭합니다.")
+    st.markdown("상위 총계/소계 오매칭을 자동 배제하고 순수 계정명 기반으로 신뢰도 높은 항목만 짝짓습니다.")
 
     s_df_clean = source_df.dropna(subset=[s_name_col]).copy()
     t_df_clean = target_df.dropna(subset=[t_name_col]).copy()
@@ -441,19 +460,21 @@ if source_df is not None and target_df is not None:
         m_head2.markdown(f"**스마트 매칭된 {right_label_input} 항목명**")
         m_head3.markdown("**매칭 판정**")
 
-        for idx, name_val in enumerate(unique_source_items):
-            # 똑똑해진 다단계 매칭 엔진 호출
+        for name_val in unique_source_items:
+            # 안전하고 똑똑해진 정밀 매칭 엔진 호출
             selected_match, status_text = find_smart_match(name_val, target_options, target_clean_dict, saved_history)
 
             col_m1, col_m2, col_m3 = st.columns([3, 3, 1.5])
             col_m1.text(name_val)
             
             default_index = target_options.index(selected_match) if selected_match in target_options else 0
+            # 항목명 자체를 고유 키로 사용하여 순번 꼬임 버그 방지
+            safe_key = f"match_sel_{curr_project_id}_{re.sub(r'[^a-zA-Z0-9가-힣]', '_', name_val)}"
             user_choice = col_m2.selectbox(
-                f"선택_{idx}", 
+                f"선택_{name_val}", 
                 target_options, 
                 index=default_index, 
-                key=f"match_select_{curr_project_id}_{idx}",
+                key=safe_key,
                 label_visibility="collapsed"
             )
             col_m3.caption(status_text)
@@ -469,7 +490,7 @@ if source_df is not None and target_df is not None:
 
     st.divider()
 
-    # 4단계: 실시간 금액 대조 및 오류 검증 (오류 원천 차단 적용)
+    # 4단계: 실시간 금액 대조 및 오류 검증
     st.subheader("4단계: 데이터 대조 및 불일치 검증 결과")
     
     mapping_dict = {item["source_name"]: item["target_name"] for item in mapping_form_data}
@@ -485,13 +506,12 @@ if source_df is not None and target_df is not None:
         except ValueError:
             return 0.0
 
-    # Pandas ValueError 원천 방지: 유니크한 금액 열만 안전 집계
+    # 안전 집계 처리
     unique_target_amt_cols = list(dict.fromkeys([t_amt for _, t_amt in matched_amount_cols]))
     t_clean_calc = t_df_clean.copy()
     for t_amt in unique_target_amt_cols:
         t_clean_calc[t_amt] = t_clean_calc[t_amt].apply(clean_number)
     
-    # 딕셔너리 기반 합산표 구축 (reset_index 충돌 완전 방지)
     target_sum_lookup = {}
     for t_name, group in t_clean_calc.groupby(t_name_col):
         target_sum_lookup[str(t_name).strip()] = {col: group[col].sum() for col in unique_target_amt_cols}
