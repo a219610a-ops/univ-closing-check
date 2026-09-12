@@ -3,6 +3,7 @@ import pandas as pd
 import sqlite3
 import io
 import difflib
+import re
 from datetime import datetime
 
 # ==========================================
@@ -15,7 +16,7 @@ st.set_page_config(
 )
 
 # ==========================================
-# 2. SQLite 데이터베이스 초기화 및 자동 보정(Migration)
+# 2. SQLite 데이터베이스 초기화 및 자동 보정
 # ==========================================
 def get_db_connection():
     conn = sqlite3.connect("accounting_audit.db", check_same_thread=False)
@@ -26,7 +27,6 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # 1) 프로젝트 관리 테이블
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,14 +35,12 @@ def init_db():
         )
     """)
     
-    # 2) 계정 매칭 학습 규칙 테이블 (구버전 컬럼 자동 보정 검사)
     cursor.execute("SELECT count(name) FROM sqlite_master WHERE type='table' AND name='account_mappings'")
     table_exists = cursor.fetchone()[0] > 0
     
     if table_exists:
         cursor.execute("PRAGMA table_info(account_mappings)")
         columns = [col[1] for col in cursor.fetchall()]
-        # 구버전 컬럼(school_name)이 남아있을 경우 최신 규격으로 테이블 재생성
         if "school_name" in columns and "source_name" not in columns:
             cursor.execute("ALTER TABLE account_mappings RENAME TO account_mappings_old")
             cursor.execute("""
@@ -73,7 +71,6 @@ def init_db():
             )
         """)
         
-    # 3) 프로젝트별 작업 상태 영구 저장 테이블 (새로고침 방지용)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS project_workspaces (
             project_id INTEGER PRIMARY KEY,
@@ -90,7 +87,6 @@ def init_db():
 
 init_db()
 
-# DB 조작 함수들
 def get_projects():
     conn = get_db_connection()
     df = pd.read_sql_query("SELECT * FROM projects ORDER BY id DESC", conn)
@@ -208,7 +204,58 @@ def save_mapping_rules(mapping_list):
     conn.close()
 
 # ==========================================
-# 3. 사이드바: 프로젝트 관리
+# 3. 고도화된 계정과목 스마트 정제 및 매칭 엔진
+# ==========================================
+def clean_account_name(raw_name):
+    """
+    계정과목명 앞뒤의 숫자 코드(5111, 1. 등), 기호, 괄호, 공백을 제거하여 순수 계정명만 추출
+    예: '5111 학부입학금' -> '학부입학금'
+    예: '1.학부수업료' -> '학부수업료'
+    """
+    if pd.isna(raw_name):
+        return ""
+    text = str(raw_name).strip()
+    # 1. 앞쪽 숫자 및 기호 제거 (예: 5111, 1., 1-1., [1] 등)
+    text = re.sub(r'^[0-9\.\-\_\(\)\[\]\s]+', '', text)
+    # 2. 중간의 특수문자 및 모든 공백 제거 (비교 전용 순수 텍스트)
+    clean_text = re.sub(r'[\s\.\-\_\(\)\[\]]+', '', text)
+    return clean_text if clean_text else text
+
+def find_smart_match(source_name, target_options, target_clean_dict, saved_history):
+    """
+    순수 계정명을 분석하여 4단계 우선순위로 최적의 매칭 추천
+    """
+    # 1단계: 과거 DB 저장 이력
+    if source_name in saved_history and saved_history[source_name] in target_options:
+        return saved_history[source_name], "💾 DB기억"
+        
+    src_clean = clean_account_name(source_name)
+    if not src_clean:
+        return "(매칭 제외)", "미매칭"
+        
+    # 2단계: 순수 계정명 완전 일치 (예: '5113 학부수업료'의 '학부수업료' == '1.학부수업료'의 '학부수업료')
+    for raw_target, clean_target in target_clean_dict.items():
+        if src_clean == clean_target:
+            return raw_target, "🎯 순수일치"
+            
+    # 3단계: 상호 포함 관계 (부분 일치)
+    for raw_target, clean_target in target_clean_dict.items():
+        if clean_target and (src_clean in clean_target or clean_target in src_clean):
+            return raw_target, "🔍 부분일치"
+            
+    # 4단계: 유사도 비교 (Difflib)
+    all_clean_targets = list(target_clean_dict.values())
+    matches = difflib.get_close_matches(src_clean, all_clean_targets, n=1, cutoff=0.5)
+    if matches:
+        matched_clean = matches[0]
+        for raw_target, clean_target in target_clean_dict.items():
+            if clean_target == matched_clean:
+                return raw_target, "🤖 AI추천"
+                
+    return "(매칭 제외)", "미매칭"
+
+# ==========================================
+# 4. 사이드바: 프로젝트 관리
 # ==========================================
 with st.sidebar:
     st.header("📂 프로젝트 관리")
@@ -244,7 +291,7 @@ with st.sidebar:
         st.info("왼쪽 상단에서 새 프로젝트를 먼저 생성해 주세요.")
 
 # ==========================================
-# 4. 메인 화면 헤더 및 설명
+# 5. 메인 화면 로직
 # ==========================================
 st.title("📊 데이터 스마트 검증기")
 st.markdown("서로 다른 두 양식의 데이터를 스마트 매칭하여 항목별 입력 오류와 차액을 자동으로 대조·검증합니다.")
@@ -253,7 +300,6 @@ if not selected_project_name:
     st.warning("👈 왼쪽 사이드바에서 프로젝트를 생성하거나 선택해 주세요.")
     st.stop()
 
-# 현재 프로젝트의 DB 저장 데이터 로드
 workspace_state = get_workspace(curr_project_id)
 
 top_c1, top_c2 = st.columns([3, 1])
@@ -266,7 +312,7 @@ with top_c2:
         st.rerun()
 
 # ----------------------------------------------------
-# 1단계: 대조 대상 엑셀 파일 업로드 및 명칭 설정
+# 1단계: 엑셀 파일 업로드 및 시트 지정
 # ----------------------------------------------------
 st.subheader("1단계: 대조 대상 엑셀 파일 업로드 및 시트 지정")
 st.caption("비교할 두 파일의 라벨을 설정할 수 있으며, 새로고침해도 작업 상태가 자동 보존됩니다.")
@@ -332,13 +378,13 @@ with col2:
     elif target_df is not None:
         st.info(f"💾 이전에 저장된 {right_label_input} 유지 중 ({len(target_df)}행)")
 
-# 두 데이터가 준비된 경우 후속 단계 진행
+# ----------------------------------------------------
+# 2~5단계: 두 파일이 준비된 경우 실행
+# ----------------------------------------------------
 if source_df is not None and target_df is not None:
     st.divider()
     
-    # ----------------------------------------------------
-    # 2단계: 기준 열(Column) 지정
-    # ----------------------------------------------------
+    # 2단계: 기준 열 지정
     st.subheader("2단계: 대조할 열(Column) 설정")
     
     col_c1, col_c2 = st.columns(2)
@@ -368,11 +414,9 @@ if source_df is not None and target_df is not None:
         
     st.divider()
 
-    # ----------------------------------------------------
-    # 3단계: 스마트 항목 매칭 엔진
-    # ----------------------------------------------------
-    st.subheader("3단계: 항목 스마트 매칭")
-    st.markdown("DB 과거 기록, 완전 일치, 유사도 분석을 거쳐 최적의 매칭 항목을 자동 추천합니다.")
+    # 3단계: 지능형 스마트 항목 매칭 엔진
+    st.subheader("3단계: 지능형 항목 스마트 매칭")
+    st.markdown("계정코드(5111 등), 목차번호(1. 등)를 자동으로 분리·정제하여 순수 계정명 기반으로 똑똑하게 자동 매칭합니다.")
 
     s_df_clean = source_df.dropna(subset=[s_name_col]).copy()
     t_df_clean = target_df.dropna(subset=[t_name_col]).copy()
@@ -380,43 +424,34 @@ if source_df is not None and target_df is not None:
     s_df_clean[s_name_col] = s_df_clean[s_name_col].astype(str).str.strip()
     t_df_clean[t_name_col] = t_df_clean[t_name_col].astype(str).str.strip()
     
-    target_unique_names = ["(매칭 제외)"] + sorted(t_df_clean[t_name_col].unique().tolist())
-    saved_history = get_saved_mappings()
+    # 대조군 정제 맵 생성
+    raw_target_list = sorted([str(x).strip() for x in t_df_clean[t_name_col].unique() if str(x).strip()])
+    target_clean_dict = {raw_name: clean_account_name(raw_name) for raw_name in raw_target_list}
+    target_options = ["(매칭 제외)"] + raw_target_list
     
-    unique_source_items = sorted(s_df_clean[s_name_col].unique().tolist())
+    saved_history = get_saved_mappings()
+    unique_source_items = sorted([str(x).strip() for x in s_df_clean[s_name_col].unique() if str(x).strip()])
     
     mapping_form_data = []
-    st.write("아래 매칭 결과를 확인하시고, 필요한 경우 드롭다운을 열어 변경해 주세요:")
+    st.write("아래 스마트 매칭 결과를 확인하시고, 수정이 필요한 항목만 드롭다운을 변경해 주세요:")
     
-    with st.expander("🔍 항목 매칭 테이블 펼치기 / 접기", expanded=True):
+    with st.expander("🔍 스마트 매칭 결과표 펼치기 / 접기", expanded=True):
         m_head1, m_head2, m_head3 = st.columns([3, 3, 1.5])
-        m_head1.markdown(f"**{left_label_input} 항목명**")
-        m_head2.markdown(f"**매칭할 {right_label_input} 항목명**")
+        m_head1.markdown(f"**{left_label_input} 원본 항목명**")
+        m_head2.markdown(f"**스마트 매칭된 {right_label_input} 항목명**")
         m_head3.markdown("**매칭 판정**")
 
         for idx, name_val in enumerate(unique_source_items):
-            selected_match = "(매칭 제외)"
-            status_text = "미매칭"
-            
-            if name_val in saved_history and saved_history[name_val] in target_unique_names:
-                selected_match = saved_history[name_val]
-                status_text = "💾 DB기억"
-            elif name_val in target_unique_names:
-                selected_match = name_val
-                status_text = "🎯 완전일치"
-            else:
-                candidates = difflib.get_close_matches(name_val, target_unique_names[1:], n=1, cutoff=0.4)
-                if candidates:
-                    selected_match = candidates[0]
-                    status_text = "🤖 AI추천"
+            # 똑똑해진 다단계 매칭 엔진 호출
+            selected_match, status_text = find_smart_match(name_val, target_options, target_clean_dict, saved_history)
 
             col_m1, col_m2, col_m3 = st.columns([3, 3, 1.5])
             col_m1.text(name_val)
             
-            default_index = target_unique_names.index(selected_match) if selected_match in target_unique_names else 0
+            default_index = target_options.index(selected_match) if selected_match in target_options else 0
             user_choice = col_m2.selectbox(
                 f"선택_{idx}", 
-                target_unique_names, 
+                target_options, 
                 index=default_index, 
                 key=f"match_select_{curr_project_id}_{idx}",
                 label_visibility="collapsed"
@@ -428,15 +463,13 @@ if source_df is not None and target_df is not None:
                 "target_name": user_choice
             })
             
-        if st.button("💾 현재 매칭 규칙 DB에 영구 저장하기 (다음 작업 시 자동 기억)", type="primary"):
+        if st.button("💾 현재 매칭 규칙 DB에 영구 저장하기 (다음 결산 때 100% 자동 기억)", type="primary"):
             save_mapping_rules(mapping_form_data)
             st.success("매칭 규칙이 영구 데이터베이스(SQLite)에 성공적으로 저장되었습니다!")
 
     st.divider()
 
-    # ----------------------------------------------------
-    # 4단계: 실시간 금액 대조 및 오류 검증
-    # ----------------------------------------------------
+    # 4단계: 실시간 금액 대조 및 오류 검증 (오류 원천 차단 적용)
     st.subheader("4단계: 데이터 대조 및 불일치 검증 결과")
     
     mapping_dict = {item["source_name"]: item["target_name"] for item in mapping_form_data}
@@ -452,10 +485,16 @@ if source_df is not None and target_df is not None:
         except ValueError:
             return 0.0
 
-    t_grouped = t_df_clean.copy()
-    for _, t_amt in matched_amount_cols:
-        t_grouped[t_amt] = t_grouped[t_amt].apply(clean_number)
-    t_summary = t_grouped.groupby(t_name_col)[[t_amt for _, t_amt in matched_amount_cols]].sum().reset_index()
+    # Pandas ValueError 원천 방지: 유니크한 금액 열만 안전 집계
+    unique_target_amt_cols = list(dict.fromkeys([t_amt for _, t_amt in matched_amount_cols]))
+    t_clean_calc = t_df_clean.copy()
+    for t_amt in unique_target_amt_cols:
+        t_clean_calc[t_amt] = t_clean_calc[t_amt].apply(clean_number)
+    
+    # 딕셔너리 기반 합산표 구축 (reset_index 충돌 완전 방지)
+    target_sum_lookup = {}
+    for t_name, group in t_clean_calc.groupby(t_name_col):
+        target_sum_lookup[str(t_name).strip()] = {col: group[col].sum() for col in unique_target_amt_cols}
 
     s_grouped = s_df_clean.copy()
     for s_amt, _ in matched_amount_cols:
@@ -476,15 +515,16 @@ if source_df is not None and target_df is not None:
         has_error = False
         if not t_name or t_name == "(매칭 제외)":
             for s_amt, t_amt in matched_amount_cols:
-                row_res[f"{left_label_input}_{s_amt}"] = row[s_amt]
+                s_val = row[s_amt]
+                row_res[f"{left_label_input}_{s_amt}"] = s_val
                 row_res[f"{right_label_input}_{t_amt}"] = 0.0
-                row_res[f"차액({s_amt}-{t_amt})"] = row[s_amt]
+                row_res[f"차액({s_amt}-{t_amt})"] = s_val
             row_res["검증 상태"] = "⚠️ 미매칭"
         else:
-            t_match_rows = t_summary[t_summary[t_name_col] == t_name]
+            t_data = target_sum_lookup.get(t_name, {})
             for s_amt, t_amt in matched_amount_cols:
                 s_val = row[s_amt]
-                t_val = t_match_rows[t_amt].values[0] if not t_match_rows.empty else 0.0
+                t_val = t_data.get(t_amt, 0.0)
                 diff = s_val - t_val
                 row_res[f"{left_label_input}_{s_amt}"] = s_val
                 row_res[f"{right_label_input}_{t_amt}"] = t_val
@@ -519,9 +559,7 @@ if source_df is not None and target_df is not None:
 
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-    # ----------------------------------------------------
     # 5단계: 결과 엑셀 다운로드
-    # ----------------------------------------------------
     st.divider()
     st.subheader("5단계: 검증 결과 엑셀 다운로드")
     
