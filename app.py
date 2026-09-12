@@ -417,7 +417,6 @@ if not selected_project_name:
 
 workspace_state = get_workspace(curr_project_id)
 
-# 탑 헤더 바
 h_col1, h_col2 = st.columns([4, 1])
 with h_col1:
     st.markdown('<div class="main-app-title">📊 데이터 스마트 검증기</div>', unsafe_allow_html=True)
@@ -592,12 +591,11 @@ for s_name in unique_source_items:
         diff = s_val - t_val
         val_status = "❌ 오류" if abs(diff) > 0.01 else "✅ 일치"
 
-    # AI 추천 (오차 0원 후보 탐색)
     ai_hint = "-"
     if val_status != "✅ 일치":
         zero_diffs = [rt for rt, sv in target_sum_lookup.items() if not is_aggregate_account(rt) and abs(sv - s_val) < 1]
         if zero_diffs:
-            ai_hint = f"👉 {zero_diffs[0]} (0원일치)"
+            ai_hint = f"👉 {zero_diffs[0]} (0원)"
         else:
             fuzzy_c = difflib.get_close_matches(clean_account_name(s_name), [clean_account_name(t) for t in raw_target_list if not is_aggregate_account(t)], n=1, cutoff=0.4)
             if fuzzy_c:
@@ -654,7 +652,7 @@ m4.markdown(f"""<div class="kpi-card" style="border-color: #FDE68A; background-c
 st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
 
 # ----------------------------------------------------
-# 5단계: 📑 엑셀형 인터랙티브 스마트 시트 (인라인 편집 & 천 단위 쉼표 서식)
+# 5단계: 📑 엑셀형 인터랙티브 스마트 시트 (황금비율 열 너비 적용)
 # ----------------------------------------------------
 ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1.8, 1.2])
 
@@ -700,39 +698,42 @@ st.info(f"💡 **인라인 편집 안내:** 아래 표에서 **[매칭 {right_la
 
 target_column_title = f"매칭 {right_label_input} 항목명"
 
-# ★ 핵심 개선: 천 단위 구분 쉼표(%,d) 적용
+# ★ 핵심 개선: 좌우 균형 맞춘 픽셀 단위 황금비율 너비 적용
 edited_df = st.data_editor(
     display_df,
     use_container_width=True,
     height=480,
     hide_index=True,
     column_config={
-        "상태": st.column_config.TextColumn("검증 상태", width="small", disabled=True),
-        f"{left_label_input} 항목명": st.column_config.TextColumn(f"{left_label_input} 항목명 (기준)", width="medium", disabled=True),
+        "상태": st.column_config.TextColumn("검증 상태", width=85, disabled=True),
+        f"{left_label_input} 항목명": st.column_config.TextColumn(f"{left_label_input} 항목명 (기준)", width=210, disabled=True),
         f"{left_label_input} 결산액": st.column_config.NumberColumn(
             f"{left_label_input} 금액 (원)", 
             format="%,d", 
+            width=135,
             disabled=True
         ),
         target_column_title: st.column_config.SelectboxColumn(
-            f"매칭 {right_label_input} 항목명 (더블클릭 변경)",
+            f"매칭 {right_label_input} 항목명 (더블클릭)",
             help="클릭하여 대조할 재단 계정을 변경할 수 있습니다.",
             options=target_options,
             required=True,
-            width="large"
+            width=210  # 대폭 축소하여 학교 항목명(210px)과 1:1 완벽 대칭
         ),
         f"{right_label_input} 결산액": st.column_config.NumberColumn(
             f"{right_label_input} 금액 (원)", 
             format="%,d", 
+            width=135,
             disabled=True
         ),
         "차액": st.column_config.NumberColumn(
-            "차액 (결산-대조)", 
+            "차액 (원)", 
             format="%,d", 
+            width=135,
             disabled=True
         ),
-        "AI 추천 힌트": st.column_config.TextColumn("AI 추천 힌트", width="medium", disabled=True),
-        "매칭유형": st.column_config.TextColumn("유형", width="small", disabled=True)
+        "AI 추천 힌트": st.column_config.TextColumn("AI 추천 힌트", width=180, disabled=True),
+        "매칭유형": st.column_config.TextColumn("유형", width=75, disabled=True)
     }
 )
 
