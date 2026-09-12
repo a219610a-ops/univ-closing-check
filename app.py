@@ -95,7 +95,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. SQLite DB 초기화 및 관리 함수
+# 2. SQLite DB 초기화 및 관리 함수 (오류 방지 자동 컬럼 보정)
 # ==========================================
 def get_db_connection():
     conn = sqlite3.connect("accounting_audit.db", check_same_thread=False)
@@ -168,17 +168,36 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             entity_type TEXT NOT NULL,
             fiscal_year INTEGER NOT NULL,
-            receipt_id INTEGER NOT NULL,
-            donor_name TEXT NOT NULL,
+            receipt_id INTEGER NOT NULL DEFAULT 0,
+            donor_name TEXT NOT NULL DEFAULT '',
             expense_date TEXT NOT NULL,
             beneficiary TEXT NOT NULL,
             content TEXT NOT NULL,
             amount REAL NOT NULL,
             is_statutory_transfer INTEGER DEFAULT 0,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (receipt_id) REFERENCES donation_receipts(id) ON DELETE CASCADE
+            created_at TEXT NOT NULL
         )
     """)
+
+    # 구버전 DB 자동 마이그레이션: 누락된 컬럼 자동 보정
+    cursor.execute("PRAGMA table_info(donation_receipts)")
+    r_cols = [c[1] for c in cursor.fetchall()]
+    current_y = datetime.now().year
+    if "fiscal_year" not in r_cols:
+        try: cursor.execute(f"ALTER TABLE donation_receipts ADD COLUMN fiscal_year INTEGER DEFAULT {current_y}")
+        except Exception: pass
+
+    cursor.execute("PRAGMA table_info(donation_expenses)")
+    e_cols = [c[1] for c in cursor.fetchall()]
+    if "fiscal_year" not in e_cols:
+        try: cursor.execute(f"ALTER TABLE donation_expenses ADD COLUMN fiscal_year INTEGER DEFAULT {current_y}")
+        except Exception: pass
+    if "receipt_id" not in e_cols:
+        try: cursor.execute("ALTER TABLE donation_expenses ADD COLUMN receipt_id INTEGER DEFAULT 0")
+        except Exception: pass
+    if "donor_name" not in e_cols:
+        try: cursor.execute("ALTER TABLE donation_expenses ADD COLUMN donor_name TEXT DEFAULT ''")
+        except Exception: pass
 
     conn.commit()
     conn.close()
@@ -236,15 +255,22 @@ def get_existing_fiscal_years(entity_type):
         years.append(now_year - 1)
     return sorted(list(set(years)), reverse=True)
 
-# 기부금 수입 삭제 함수
+# 안전한 기부금 수입 및 종속 지출 삭제 함수
 def delete_donation_receipt(receipt_id):
     conn = get_db_connection()
     cursor = conn.cursor()
-    # 외래키 제약조건에 따라 연결된 지출도 함께 삭제
-    cursor.execute("DELETE FROM donation_expenses WHERE receipt_id = ?", (receipt_id,))
-    cursor.execute("DELETE FROM donation_receipts WHERE id = ?", (receipt_id,))
-    conn.commit()
-    conn.close()
+    try:
+        cursor.execute("PRAGMA table_info(donation_expenses)")
+        cols = [c[1] for c in cursor.fetchall()]
+        if "receipt_id" in cols:
+            cursor.execute("DELETE FROM donation_expenses WHERE receipt_id = ?", (receipt_id,))
+        cursor.execute("DELETE FROM donation_receipts WHERE id = ?", (receipt_id,))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
 
 # ==========================================
 # 3. 글로벌 세션 상태 및 상단 미니 메뉴바
@@ -528,7 +554,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         # 수입 대장 헤더 및 수입 합계 배너
         st.markdown(f"##### 📋 [{current_year} 회계연도] 기부금 수입 대장 및 관리")
         
-        # ★ 수입 합계 요약 배너 표시
         st.markdown(f"""
         <div class="total-banner">
             <div>
@@ -570,14 +595,13 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             if st.session_state.selected_receipt_id_for_expense not in summary_table_df['수입ID'].values:
                 st.session_state.selected_receipt_id_for_expense = int(summary_table_df.iloc[0]['수입ID'])
 
-            # 기부금 수입 대장 테이블
             st.dataframe(
                 summary_table_df.drop(columns=['수입ID']),
                 use_container_width=True,
                 height=240
             )
 
-            # ★ 수입 건 선택 및 삭제 관리 컨트롤 영역
+            # 수입 건 선택 및 삭제 관리 컨트롤 영역
             ctrl_c1, ctrl_c2 = st.columns([3.5, 1.5])
             with ctrl_c1:
                 sel_r_id = st.selectbox(
@@ -591,7 +615,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
 
             with ctrl_c2:
                 st.markdown("<div style='height:25px;'></div>", unsafe_allow_html=True)
-                # ★ 수입 내역 삭제 팝오버 버튼
                 target_del_row = summary_table_df[summary_table_df['수입ID'] == sel_r_id].iloc[0]
                 with st.popover(f"🗑️ 선택 건 삭제", help="선택한 기부금 수입 건을 삭제합니다."):
                     st.markdown(f"**[{target_del_row['기부자명']}] 님의 수입 내역 삭제**")
