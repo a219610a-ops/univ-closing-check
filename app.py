@@ -10,8 +10,8 @@ from datetime import datetime
 # 1. 페이지 기본 설정 및 모던 밝은 톤 스타일 주입
 # ==========================================
 st.set_page_config(
-    page_title="데이터 스마트 검증기 | 스마트 결산 대조 룸",
-    page_icon="⚡",
+    page_title="데이터 스마트 검증기",
+    page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -24,16 +24,30 @@ st.markdown("""
         background-color: #F8FAFC;
     }
     
+    /* 타이틀 크기 최적화 */
+    .main-app-title {
+        font-size: 22px !important;
+        font-weight: 700 !important;
+        color: #0F172A !important;
+        margin-bottom: 2px !important;
+        padding-top: 0px !important;
+    }
+    .main-app-caption {
+        font-size: 13px !important;
+        color: #64748B !important;
+        margin-bottom: 12px !important;
+    }
+    
     /* 카드 컨테이너 스타일 */
     .kpi-card {
         background-color: #FFFFFF;
         border: 1px solid #E2E8F0;
         border-radius: 12px;
-        padding: 16px 20px;
+        padding: 14px 18px;
         box-shadow: 0 1px 3px rgba(0,0,0,0.04);
     }
     .kpi-val {
-        font-size: 24px;
+        font-size: 22px;
         font-weight: 700;
         margin-top: 4px;
     }
@@ -43,9 +57,9 @@ st.markdown("""
         background-color: #FFFFFF;
         border: 1px solid #E2E8F0;
         border-radius: 10px;
-        padding: 14px 16px;
-        margin-bottom: 12px;
-        min-height: 82px;
+        padding: 12px 14px;
+        margin-bottom: 10px;
+        min-height: 76px;
         display: flex;
         flex-direction: column;
         justify-content: center;
@@ -75,15 +89,15 @@ st.markdown("""
         background-color: #FFFFFF;
         border: 2px solid #EF4444;
         border-radius: 14px;
-        padding: 20px;
-        margin-top: 24px;
+        padding: 18px;
+        margin-top: 20px;
         box-shadow: 0 4px 12px rgba(239, 68, 68, 0.08);
     }
     
     /* 뱃지 */
     .badge {
         display: inline-block;
-        padding: 3px 8px;
+        padding: 2px 7px;
         border-radius: 6px;
         font-size: 11px;
         font-weight: 600;
@@ -178,7 +192,7 @@ def create_project(name):
         new_id = cursor.lastrowid
         cursor.execute("""
             INSERT INTO project_workspaces (project_id, left_label, right_label, source_data_json, target_data_json, updated_at)
-            VALUES (?, '학교 결산서', '사학진흥재단 양식', NULL, NULL, ?)
+            VALUES (?, '학교 양식', '재단 양식', NULL, NULL, ?)
         """, (new_id, now))
         conn.commit()
         success = True
@@ -211,12 +225,12 @@ def get_workspace(project_id):
         except Exception:
             pass
         return {
-            "left_label": row[0] or "학교 결산서",
-            "right_label": row[1] or "사학진흥재단 양식",
+            "left_label": row[0] or "학교 양식",
+            "right_label": row[1] or "재단 양식",
             "source_data": s_df,
             "target_data": t_df
         }
-    return {"left_label": "학교 결산서", "right_label": "사학진흥재단 양식", "source_data": None, "target_data": None}
+    return {"left_label": "학교 양식", "right_label": "재단 양식", "source_data": None, "target_data": None}
 
 def update_workspace(project_id, left_label, right_label, source_df, target_df):
     conn = get_db_connection()
@@ -338,27 +352,39 @@ def find_smart_match(source_name, target_options, target_clean_dict, saved_histo
     return "(매칭 제외)", "미매칭"
 
 # ==========================================
-# 4. 스마트 공식 총계 추출 및 후보 탐색 함수
+# 4. 스마트 공식 총계 추출 및 후보 탐색 함수 (완전 개방)
 # ==========================================
-def find_total_candidates(df, name_col, amt_col):
-    """시트 내에서 총계 후보가 될 수 있는 행 목록을 추출"""
-    if df is None or df.empty or name_col not in df.columns or amt_col not in df.columns:
-        return []
-    temp = df.dropna(subset=[name_col]).copy()
-    temp[name_col] = temp[name_col].astype(str).str.strip()
-    temp['__amt_clean'] = temp[amt_col].apply(clean_number)
+def get_all_row_candidates(df, name_col):
+    """
+    시트 내의 모든 고유 행을 추출하되,
+    '총계', '합계', '수입', '지출', '계'가 들어간 행을 최상단에 우선 배치
+    """
+    if df is None or df.empty or name_col not in df.columns:
+        return ["(자동 감지)"]
     
-    pats = [r'자금수입총계', r'자금지출총계', r'수입총계', r'지출총계', r'총\s*계', r'합\s*계', r'수입합계', r'지출합계']
-    mask = temp[name_col].str.contains('|'.join(pats), regex=True, na=False)
-    candidates = temp[mask & (temp['__amt_clean'] > 0)]
-    return list(candidates[name_col].unique())
+    all_names = [str(x).strip() for x in df[name_col].dropna().unique() if str(x).strip()]
+    
+    # 우선 추천 키워드 매칭 행
+    pats = [r'자금수입총계', r'자금지출총계', r'수입총계', r'지출총계', r'총\s*계', r'합\s*계', r'수입합계', r'지출합계', r'계']
+    priority_pattern = re.compile('|'.join(pats))
+    
+    priority_rows = []
+    normal_rows = []
+    
+    for name in all_names:
+        if priority_pattern.search(name):
+            priority_rows.append(name)
+        else:
+            normal_rows.append(name)
+            
+    return ["(자동 감지)"] + sorted(priority_rows) + sorted(normal_rows)
 
 def extract_smart_grand_total(df, name_col, amt_col, target_total_type="수입", forced_row=None):
     """
-    공식 총계 산출 로직:
-    1. 사용자가 특정 행을 지정한 경우 해당 행 금액 반환
-    2. 재단 양식의 총계 유형(수입 또는 지출)에 맞는 학교 총계 행 탐색
-    3. 세부 계정만 합산할 경우 수입(5xxx) 또는 지출(4xxx) 계정 범위만 발라내어 합산
+    총계 산출:
+    1. 사용자가 직접 특정 행을 지정한 경우 -> 해당 행 금액 반환
+    2. 자동 감지 시 -> 수입/지출 총계 행 탐색
+    3. 없을 경우 -> 수입(5xxx) 또는 지출(4xxx) 계정 범위만 발라내어 합산
     """
     if df is None or df.empty or name_col not in df.columns or amt_col not in df.columns:
         return 0.0, "데이터 없음"
@@ -367,13 +393,13 @@ def extract_smart_grand_total(df, name_col, amt_col, target_total_type="수입",
     temp[name_col] = temp[name_col].astype(str).str.strip()
     temp['__amt_clean'] = temp[amt_col].apply(clean_number)
     
-    # 1. 사용자 강제 지정 행 우선
+    # 1. 사용자 직접 지정
     if forced_row and forced_row != "(자동 감지)":
         matched = temp[temp[name_col] == forced_row]
         if not matched.empty:
             return float(matched.iloc[-1]['__amt_clean']), forced_row
 
-    # 2. 키워드별 우선순위 정밀 탐색
+    # 2. 자동 감지
     if "수입" in target_total_type:
         patterns = [r'자금수입총계', r'자금수입\s*총계', r'수입총계', r'수입\s*총계', r'수입합계', r'총\s*계']
     elif "지출" in target_total_type:
@@ -388,11 +414,10 @@ def extract_smart_grand_total(df, name_col, amt_col, target_total_type="수입",
             chosen = valid_rows.iloc[-1]
             return float(chosen['__amt_clean']), chosen[name_col]
 
-    # 3. 총계 행이 없는 경우: 수입/지출 계정코드(5천번대/4천번대)만 똑똑하게 순합계 산출
+    # 3. 총계 행이 없는 경우: 수입/지출 계정코드(5천/4천번대) 순합계
     exclude_pattern = '|'.join(EXCLUDE_KEYWORDS)
     pure_details = temp[~temp[name_col].str.contains(exclude_pattern, regex=True, na=False)]
     
-    # 계정코드 5천번대(수입) 필터링 시도
     if "수입" in target_total_type:
         s_income = pure_details[pure_details[name_col].str.contains(r'^(5\d{3}|수입)', regex=True, na=False)]
         if not s_income.empty and s_income['__amt_clean'].sum() > 0:
@@ -402,7 +427,6 @@ def extract_smart_grand_total(df, name_col, amt_col, target_total_type="수입",
         if not s_expense.empty and s_expense['__amt_clean'].sum() > 0:
             return float(s_expense['__amt_clean'].sum()), "지출계정(4천번대) 순합계"
 
-    # 일반 순합계
     pure_sum = pure_details['__amt_clean'].sum()
     return float(pure_sum), "세부계정 순합계"
 
@@ -447,7 +471,7 @@ with st.sidebar:
 # 6. 메인 화면 로직
 # ==========================================
 if not selected_project_name:
-    st.title("⚡ 데이터 스마트 검증기")
+    st.markdown('<div class="main-app-title">📊 데이터 스마트 검증기</div>', unsafe_allow_html=True)
     st.info("👈 왼쪽 사이드바를 열어 프로젝트를 생성하거나 선택해 주세요.")
     st.stop()
 
@@ -456,11 +480,11 @@ workspace_state = get_workspace(curr_project_id)
 if "selected_inspect_item" not in st.session_state:
     st.session_state.selected_inspect_item = None
 
-# 탑 헤더 바
+# 상단 헤더 바 (작고 단정한 타이틀)
 h_col1, h_col2 = st.columns([4, 1])
 with h_col1:
-    st.title("⚡ 스마트 결산 대조 룸 (Reconciliation Room)")
-    st.caption(f"📌 현재 활성 프로젝트: **{selected_project_name}** | 양측 결산서를 실시간 브릿지로 대조하고 차액을 진단합니다.")
+    st.markdown('<div class="main-app-title">📊 데이터 스마트 검증기</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="main-app-caption">📌 현재 프로젝트: <b>{selected_project_name}</b> | 두 양식의 결산 데이터를 지능형으로 대조하고 오차를 진단합니다.</div>', unsafe_allow_html=True)
 with h_col2:
     if st.button("🔄 데이터 초기화", use_container_width=True):
         reset_workspace_data(curr_project_id)
@@ -523,9 +547,9 @@ if source_df is None or target_df is None:
     st.stop()
 
 # ----------------------------------------------------
-# 2단계: 대조 열 설정 및 총계 행 정밀 지정
+# 2단계: 대조 열 설정 및 양측 총계 행 직접 지정 (완전 개방)
 # ----------------------------------------------------
-with st.expander("⚙️ 2단계: 대조 열 및 총계 행 설정 (정밀 보정)", expanded=False):
+with st.expander("⚙️ 2단계: 대조 열 및 양측 총계 행 설정 (직접 지정 가능)", expanded=False):
     col_c1, col_c2 = st.columns(2)
     source_cols = list(source_df.columns)
     target_cols = list(target_df.columns)
@@ -540,14 +564,42 @@ with st.expander("⚙️ 2단계: 대조 열 및 총계 행 설정 (정밀 보�
     with ac2:
         t_amt = st.selectbox(f"비교할 금액 열 ({right_label_input})", target_cols, index=min(2, len(target_cols)-1))
 
-    # 학교 양식 총계 후보 행 직접 선택 옵션
-    s_total_candidates = ["(자동 감지)"] + find_total_candidates(source_df, s_name_col, s_amt)
-    forced_s_total_row = st.selectbox(
-        f"🏫 {left_label_input} 총계 행 직접 지정 (시트 내 수입총계/합계 행 선택)",
-        s_total_candidates,
-        index=0,
-        help="자동 감지가 시트 전체를 더해버릴 경우, 엑셀에 적혀 있는 '자금수입총계' 등 실제 총계 행을 직접 골라주세요."
-    )
+    st.markdown("---")
+    st.markdown("##### 📌 공식 총계 행 지정 (좌우 각각 선택 및 실시간 금액 확인)")
+    st.caption("자동 감지 외에도, 엑셀 시트에 있는 모든 행 중에서 공식 총계로 삼을 행을 자유롭게 검색·지정할 수 있습니다.")
+
+    tc1, tc2 = st.columns(2)
+    
+    # 1. 학교 양식 총계 행 후보 전체 개방
+    s_candidates = get_all_row_candidates(source_df, s_name_col)
+    with tc1:
+        forced_s_total_row = st.selectbox(
+            f"🏫 [{left_label_input}] 총계 행 선택",
+            s_candidates,
+            index=0,
+            key=f"forced_s_tot_{curr_project_id}"
+        )
+        # 선택된 행의 금액 실시간 미리보기
+        if forced_s_total_row != "(자동 감지)":
+            row_match = source_df[source_df[s_name_col].astype(str).str.strip() == forced_s_total_row]
+            if not row_match.empty:
+                preview_amt = clean_number(row_match.iloc[-1][s_amt])
+                st.caption(f"확인된 금액: **{preview_amt:,.0f} 원**")
+
+    # 2. 재단 양식 총계 행 후보 전체 개방
+    t_candidates = get_all_row_candidates(target_df, t_name_col)
+    with tc2:
+        forced_t_total_row = st.selectbox(
+            f"🏛️ [{right_label_input}] 총계 행 선택",
+            t_candidates,
+            index=0,
+            key=f"forced_t_tot_{curr_project_id}"
+        )
+        if forced_t_total_row != "(자동 감지)":
+            row_match_t = target_df[target_df[t_name_col].astype(str).str.strip() == forced_t_total_row]
+            if not row_match_t.empty:
+                preview_amt_t = clean_number(row_match_t.iloc[-1][t_amt])
+                st.caption(f"확인된 금액: **{preview_amt_t:,.0f} 원**")
 
 # ----------------------------------------------------
 # 3단계: 정밀 총계 산출 및 데이터 매칭
@@ -560,11 +612,14 @@ t_df_clean[t_name_col] = t_df_clean[t_name_col].astype(str).str.strip()
 s_df_clean[s_amt] = s_df_clean[s_amt].apply(clean_number)
 t_df_clean[t_amt] = t_df_clean[t_amt].apply(clean_number)
 
-# 재단 양식 총계 먼저 산출 (수입인지 지출인지 파악)
-official_t_total, t_total_source_name = extract_smart_grand_total(t_df_clean, t_name_col, t_amt)
+# 재단 양식 총계 산출 (직접 지정 지원)
+official_t_total, t_total_source_name = extract_smart_grand_total(
+    t_df_clean, t_name_col, t_amt, 
+    forced_row=forced_t_total_row
+)
 total_type = "수입" if "수입" in t_total_source_name else ("지출" if "지출" in t_total_source_name else "전체")
 
-# 학교 양식 총계 정밀 산출
+# 학교 양식 총계 산출 (직접 지정 지원)
 official_s_total, s_total_source_name = extract_smart_grand_total(
     s_df_clean, s_name_col, s_amt, 
     target_total_type=total_type, 
@@ -630,9 +685,9 @@ border_color = "#059669" if abs(grand_diff) < 1 else "#DC2626"
 diff_summary_text = "총계 완벽 일치 (0원)" if abs(grand_diff) < 1 else f"총계 차액: {grand_diff:+,.0f} 원"
 
 st.markdown(f"""
-<div class="kpi-card" style="margin-bottom: 20px; border-left: 6px solid {border_color};">
-    <div style="font-size: 13px; font-weight: 600; color: #64748B;">자금 결산 정합성 현황 (공식 총계 행 기반)</div>
-    <div style="font-size: 17px; font-weight: 700; color: #0F172A; margin-top: 6px;">
+<div class="kpi-card" style="margin-bottom: 18px; border-left: 5px solid {border_color};">
+    <div style="font-size: 13px; font-weight: 600; color: #64748B;">자금 결산 정합성 현황 (공식 총계 행 기준)</div>
+    <div style="font-size: 16px; font-weight: 700; color: #0F172A; margin-top: 5px;">
         {left_label_input} 총계: <b style="color:#1E40AF;">{official_s_total:,.0f} 원</b> 
         <span style="font-size:12px; color:#64748B; font-weight:normal;">(출처: {s_total_source_name})</span>
         &nbsp;↔&nbsp; 
@@ -652,7 +707,7 @@ m2.markdown(f"""<div class="kpi-card" style="border-color: #A7F3D0; background-c
 m3.markdown(f"""<div class="kpi-card" style="border-color: #FECACA; background-color: #FEF2F2;"><div style="color: #DC2626; font-size:12px; font-weight:600;">차액 오류(확인필요)</div><div class="kpi-val" style="color: #DC2626;">{error_items}건</div></div>""", unsafe_allow_html=True)
 m4.markdown(f"""<div class="kpi-card" style="border-color: #FDE68A; background-color: #FFFBEB;"><div style="color: #D97706; font-size:12px; font-weight:600;">미매칭 항목</div><div class="kpi-val" style="color: #D97706;">{unmatched_items}건</div></div>""", unsafe_allow_html=True)
 
-st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
 # ----------------------------------------------------
 # 5단계: 3분할 스마트 매칭 브릿지 대조 룸 (메인 뷰)
@@ -675,16 +730,16 @@ if search_keyword.strip():
 
 b_col1, b_col2, b_col3 = st.columns([1.2, 1.6, 1.2])
 with b_col1:
-    st.markdown(f"#### 🏫 {left_label_input} (기준 원장)")
+    st.markdown(f"##### 🏫 {left_label_input} (기준 원장)")
     st.caption("계정명 및 결산액")
 with b_col2:
-    st.markdown("#### ⚡ 스마트 매칭 & 차액 브릿지")
+    st.markdown("##### ⚡ 스마트 매칭 & 차액 브릿지")
     st.caption("실시간 오차 계산 및 1클릭 변경")
 with b_col3:
-    st.markdown(f"#### 🏛️ {right_label_input} (대조 원장)")
+    st.markdown(f"##### 🏛️ {right_label_input} (대조 원장)")
     st.caption("매칭 계정 및 재단 합산액")
 
-st.markdown("<hr style='margin-top: 2px; margin-bottom: 12px; border-color: #E2E8F0;'>", unsafe_allow_html=True)
+st.markdown("<hr style='margin-top: 2px; margin-bottom: 10px; border-color: #E2E8F0;'>", unsafe_allow_html=True)
 
 selected_row_data = None
 
@@ -706,8 +761,8 @@ for idx, r in filtered_df.iterrows():
         sel_class = "panel-selected" if is_selected else ""
         st.markdown(f"""
         <div class="panel-box {sel_class}">
-            <div style="font-weight: 700; color: #1E293B; font-size: 14px;">{s_name}</div>
-            <div style="font-size: 12px; color: #64748B; margin-top: 4px;">결산: <b>{s_val:,.0f}</b> 원</div>
+            <div style="font-weight: 700; color: #1E293B; font-size: 13.5px;">{s_name}</div>
+            <div style="font-size: 11.5px; color: #64748B; margin-top: 3px;">결산: <b>{s_val:,.0f}</b> 원</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -716,16 +771,16 @@ for idx, r in filtered_df.iterrows():
         diff_color = "#059669" if v_status == "✅ 정상 일치" else ("#DC2626" if v_status == "❌ 차액 발생" else "#D97706")
         diff_text = "0 원 (완벽 일치)" if abs(diff) < 0.01 else f"차액: {diff:+,.0f} 원"
 
-        bc_sub1, bc_sub2 = st.columns([2.2, 1])
+        bc_sub1, bc_sub2 = st.columns([2.3, 1])
         with bc_sub1:
             st.markdown(f"""
             <div class="panel-box {bridge_style}">
-                <div style="font-weight: 700; font-size: 13.5px; color: {diff_color};">{diff_text}</div>
-                <div style="font-size: 11.5px; color: #475569; margin-top: 4px;">상태: {v_status} <span class="badge" style="background:#E2E8F0; color:#334155;">{r['match_type']}</span></div>
+                <div style="font-weight: 700; font-size: 13px; color: {diff_color};">{diff_text}</div>
+                <div style="font-size: 11px; color: #475569; margin-top: 3px;">상태: {v_status} <span class="badge" style="background:#E2E8F0; color:#334155;">{r['match_type']}</span></div>
             </div>
             """, unsafe_allow_html=True)
         with bc_sub2:
-            st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
             if v_status != "✅ 정상 일치":
                 if st.button("🔍 진단", key=f"btn_inspect_{idx}", use_container_width=True, type="primary"):
                     st.session_state.selected_inspect_item = s_name
@@ -740,8 +795,8 @@ for idx, r in filtered_df.iterrows():
         t_display_name = t_name if t_name != "(매칭 제외)" else "<span style='color:#D97706;'>(매칭 제외)</span>"
         st.markdown(f"""
         <div class="panel-box {sel_class}">
-            <div style="font-weight: 700; color: #6D28D9; font-size: 14px;">{t_display_name}</div>
-            <div style="font-size: 12px; color: #64748B; margin-top: 4px;">재단: <b>{t_val:,.0f}</b> 원</div>
+            <div style="font-weight: 700; color: #6D28D9; font-size: 13.5px;">{t_display_name}</div>
+            <div style="font-size: 11.5px; color: #64748B; margin-top: 3px;">재단: <b>{t_val:,.0f}</b> 원</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -756,7 +811,7 @@ if selected_row_data is not None:
     
     st.markdown(f"""
     <div class="inspector-box">
-        <div style="font-size: 16px; font-weight: 700; color: #DC2626; margin-bottom: 12px;">
+        <div style="font-size: 15px; font-weight: 700; color: #DC2626; margin-bottom: 10px;">
             🔍 [원인 진단 & 1클릭 해결 패널]  선택 항목: {s_curr} (차액: {diff_curr:+,.0f} 원)
         </div>
     """, unsafe_allow_html=True)
