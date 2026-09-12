@@ -3,7 +3,6 @@ import pandas as pd
 import sqlite3
 import io
 import difflib
-import json
 from datetime import datetime
 
 # ==========================================
@@ -16,7 +15,7 @@ st.set_page_config(
 )
 
 # ==========================================
-# 2. SQLite 데이터베이스 초기화 및 관리 함수
+# 2. SQLite 데이터베이스 초기화 및 자동 보정(Migration)
 # ==========================================
 def get_db_connection():
     conn = sqlite3.connect("accounting_audit.db", check_same_thread=False)
@@ -27,7 +26,7 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # 1) 프로젝트 테이블
+    # 1) 프로젝트 관리 테이블
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,17 +35,44 @@ def init_db():
         )
     """)
     
-    # 2) 계정 매칭 학습 규칙 테이블 (누적 기억용)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS account_mappings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_name TEXT NOT NULL,
-            target_name TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(source_name, target_name)
-        )
-    """)
+    # 2) 계정 매칭 학습 규칙 테이블 (구버전 컬럼 자동 보정 검사)
+    cursor.execute("SELECT count(name) FROM sqlite_master WHERE type='table' AND name='account_mappings'")
+    table_exists = cursor.fetchone()[0] > 0
     
+    if table_exists:
+        cursor.execute("PRAGMA table_info(account_mappings)")
+        columns = [col[1] for col in cursor.fetchall()]
+        # 구버전 컬럼(school_name)이 남아있을 경우 최신 규격으로 테이블 재생성
+        if "school_name" in columns and "source_name" not in columns:
+            cursor.execute("ALTER TABLE account_mappings RENAME TO account_mappings_old")
+            cursor.execute("""
+                CREATE TABLE account_mappings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_name TEXT NOT NULL,
+                    target_name TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(source_name, target_name)
+                )
+            """)
+            try:
+                cursor.execute("""
+                    INSERT OR IGNORE INTO account_mappings (source_name, target_name, updated_at)
+                    SELECT school_name, foundation_name, updated_at FROM account_mappings_old
+                """)
+            except Exception:
+                pass
+            cursor.execute("DROP TABLE IF EXISTS account_mappings_old")
+    else:
+        cursor.execute("""
+            CREATE TABLE account_mappings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_name TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(source_name, target_name)
+            )
+        """)
+        
     # 3) 프로젝트별 작업 상태 영구 저장 테이블 (새로고침 방지용)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS project_workspaces (
@@ -64,7 +90,7 @@ def init_db():
 
 init_db()
 
-# DB 데이터 조작 함수들
+# DB 조작 함수들
 def get_projects():
     conn = get_db_connection()
     df = pd.read_sql_query("SELECT * FROM projects ORDER BY id DESC", conn)
@@ -78,7 +104,6 @@ def create_project(name):
     try:
         cursor.execute("INSERT INTO projects (name, created_at) VALUES (?, ?)", (name, now))
         new_id = cursor.lastrowid
-        # 기본 워크스페이스 레코드 생성
         cursor.execute("""
             INSERT INTO project_workspaces (project_id, left_label, right_label, source_data_json, target_data_json, updated_at)
             VALUES (?, '기준 데이터', '대조 데이터', NULL, NULL, ?)
@@ -104,11 +129,20 @@ def get_workspace(project_id):
     row = cursor.fetchone()
     conn.close()
     if row:
+        s_df = None
+        t_df = None
+        try:
+            if row[2]:
+                s_df = pd.read_json(io.StringIO(row[2]))
+            if row[3]:
+                t_df = pd.read_json(io.StringIO(row[3]))
+        except Exception:
+            pass
         return {
             "left_label": row[0] or "기준 데이터",
             "right_label": row[1] or "대조 데이터",
-            "source_data": pd.read_json(io.StringIO(row[2])) if row[2] else None,
-            "target_data": pd.read_json(io.StringIO(row[3])) if row[3] else None
+            "source_data": s_df,
+            "target_data": t_df
         }
     return {"left_label": "기준 데이터", "right_label": "대조 데이터", "source_data": None, "target_data": None}
 
@@ -146,9 +180,15 @@ def reset_workspace_data(project_id):
 
 def get_saved_mappings():
     conn = get_db_connection()
-    df = pd.read_sql_query("SELECT source_name, target_name FROM account_mappings", conn)
-    conn.close()
-    return dict(zip(df['source_name'], df['target_name']))
+    mapping_dict = {}
+    try:
+        df = pd.read_sql_query("SELECT source_name, target_name FROM account_mappings", conn)
+        mapping_dict = dict(zip(df['source_name'], df['target_name']))
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    return mapping_dict
 
 def save_mapping_rules(mapping_list):
     conn = get_db_connection()
@@ -213,7 +253,7 @@ if not selected_project_name:
     st.warning("👈 왼쪽 사이드바에서 프로젝트를 생성하거나 선택해 주세요.")
     st.stop()
 
-# 현재 프로젝트의 DB 저장 데이터 불러오기
+# 현재 프로젝트의 DB 저장 데이터 로드
 workspace_state = get_workspace(curr_project_id)
 
 top_c1, top_c2 = st.columns([3, 1])
@@ -229,23 +269,22 @@ with top_c2:
 # 1단계: 대조 대상 엑셀 파일 업로드 및 명칭 설정
 # ----------------------------------------------------
 st.subheader("1단계: 대조 대상 엑셀 파일 업로드 및 시트 지정")
-st.caption("비교할 두 엑셀 파일의 라벨을 원하는 이름으로 변경할 수 있으며, 새로고침해도 작업 상태가 자동 보존됩니다.")
+st.caption("비교할 두 파일의 라벨을 설정할 수 있으며, 새로고침해도 작업 상태가 자동 보존됩니다.")
 
 lbl_c1, lbl_c2 = st.columns(2)
 with lbl_c1:
     left_label_input = st.text_input(
-        "왼쪽 파일 라벨 (기준 데이터)", 
+        "왼쪽 파일 라벨", 
         value=workspace_state["left_label"], 
         key=f"left_lbl_{curr_project_id}"
     )
 with lbl_c2:
     right_label_input = st.text_input(
-        "오른쪽 파일 라벨 (대조 데이터)", 
+        "오른쪽 파일 라벨", 
         value=workspace_state["right_label"], 
         key=f"right_lbl_{curr_project_id}"
     )
 
-# 라벨 변경 시 DB 업데이트
 if (left_label_input != workspace_state["left_label"]) or (right_label_input != workspace_state["right_label"]):
     update_workspace(
         curr_project_id, 
@@ -271,7 +310,7 @@ with col1:
             if s_sheet:
                 source_df = pd.read_excel(school_file, sheet_name=s_sheet)
                 update_workspace(curr_project_id, left_label_input, right_label_input, source_df, target_df)
-                st.success(f"{left_label_input} 로드 및 DB 저장 완료 ({len(source_df)}행)")
+                st.success(f"{left_label_input} 로드 완료 ({len(source_df)}행)")
         except Exception as e:
             st.error(f"파일 읽기 오류: {e}")
     elif source_df is not None:
@@ -287,13 +326,13 @@ with col2:
             if t_sheet:
                 target_df = pd.read_excel(found_file, sheet_name=t_sheet)
                 update_workspace(curr_project_id, left_label_input, right_label_input, source_df, target_df)
-                st.success(f"{right_label_input} 로드 및 DB 저장 완료 ({len(target_df)}행)")
+                st.success(f"{right_label_input} 로드 완료 ({len(target_df)}행)")
         except Exception as e:
             st.error(f"파일 읽기 오류: {e}")
     elif target_df is not None:
         st.info(f"💾 이전에 저장된 {right_label_input} 유지 중 ({len(target_df)}행)")
 
-# 두 파일 데이터가 모두 준비된 경우에만 다음 단계 진행
+# 두 데이터가 준비된 경우 후속 단계 진행
 if source_df is not None and target_df is not None:
     st.divider()
     
@@ -306,15 +345,15 @@ if source_df is not None and target_df is not None:
     with col_c1:
         st.markdown(f"**[{left_label_input}]**")
         source_cols = list(source_df.columns)
-        s_name_col = st.selectbox(f"{left_label_input} 항목명(계정과목) 열", source_cols, index=0)
+        s_name_col = st.selectbox(f"{left_label_input} 항목명 열", source_cols, index=0)
         
     with col_c2:
         st.markdown(f"**[{right_label_input}]**")
         target_cols = list(target_df.columns)
-        t_name_col = st.selectbox(f"{right_label_input} 항목명(계정과목) 열", target_cols, index=0)
+        t_name_col = st.selectbox(f"{right_label_input} 항목명 열", target_cols, index=0)
 
     st.markdown("**[비교할 금액 열(Column) 짝짓기]**")
-    st.caption("예산액, 결산액 등 비교할 금액 열들을 각각 짝지어 선택해 주세요.")
+    st.caption("비교가 필요한 금액 열들을 짝지어 선택해 주세요.")
     
     amount_col_count = st.number_input("비교할 금액 열 개수", min_value=1, max_value=5, value=1)
     matched_amount_cols = []
@@ -332,10 +371,9 @@ if source_df is not None and target_df is not None:
     # ----------------------------------------------------
     # 3단계: 스마트 항목 매칭 엔진
     # ----------------------------------------------------
-    st.subheader("3단계: 항목(계정과목) 스마트 매칭")
-    st.markdown("DB 과거 매칭 기록, 완전 일치, 유사도 분석을 거쳐 최적의 매칭 항목을 자동 추천합니다.")
+    st.subheader("3단계: 항목 스마트 매칭")
+    st.markdown("DB 과거 기록, 완전 일치, 유사도 분석을 거쳐 최적의 매칭 항목을 자동 추천합니다.")
 
-    # 데이터 정리
     s_df_clean = source_df.dropna(subset=[s_name_col]).copy()
     t_df_clean = target_df.dropna(subset=[t_name_col]).copy()
     
@@ -345,11 +383,10 @@ if source_df is not None and target_df is not None:
     target_unique_names = ["(매칭 제외)"] + sorted(t_df_clean[t_name_col].unique().tolist())
     saved_history = get_saved_mappings()
     
-    # 고유 항목명 목록 추출
     unique_source_items = sorted(s_df_clean[s_name_col].unique().tolist())
     
     mapping_form_data = []
-    st.write("아래 매칭 결과를 확인하시고, 필요한 경우 드롭다운을 열어 직접 변경해 주세요:")
+    st.write("아래 매칭 결과를 확인하시고, 필요한 경우 드롭다운을 열어 변경해 주세요:")
     
     with st.expander("🔍 항목 매칭 테이블 펼치기 / 접기", expanded=True):
         m_head1, m_head2, m_head3 = st.columns([3, 3, 1.5])
@@ -361,7 +398,6 @@ if source_df is not None and target_df is not None:
             selected_match = "(매칭 제외)"
             status_text = "미매칭"
             
-            # 매칭 우선순위 로직
             if name_val in saved_history and saved_history[name_val] in target_unique_names:
                 selected_match = saved_history[name_val]
                 status_text = "💾 DB기억"
@@ -416,13 +452,11 @@ if source_df is not None and target_df is not None:
         except ValueError:
             return 0.0
 
-    # 대조 데이터 항목별 합산
     t_grouped = t_df_clean.copy()
     for _, t_amt in matched_amount_cols:
         t_grouped[t_amt] = t_grouped[t_amt].apply(clean_number)
     t_summary = t_grouped.groupby(t_name_col)[[t_amt for _, t_amt in matched_amount_cols]].sum().reset_index()
 
-    # 기준 데이터 집계 및 병합
     s_grouped = s_df_clean.copy()
     for s_amt, _ in matched_amount_cols:
         s_grouped[s_amt] = s_grouped[s_amt].apply(clean_number)
@@ -464,7 +498,6 @@ if source_df is not None and target_df is not None:
         
     result_df = pd.DataFrame(result_rows)
 
-    # 대시보드 메트릭
     total_count = len(result_df)
     match_count = len(result_df[result_df["검증 상태"] == "✅ 정상 일치"])
     error_count = len(result_df[result_df["검증 상태"] == "❌ 불일치(오류)"])
@@ -476,7 +509,6 @@ if source_df is not None and target_df is not None:
     m_col3.metric("불일치(오류)", f"{error_count}건", delta=-error_count if error_count > 0 else 0)
     m_col4.metric("미매칭 항목", f"{unmatched_count}건")
 
-    # 필터 옵션
     filter_option = st.radio("표시할 결과 선택", ["전체 보기", "❌ 불일치(오류) 항목만 보기", "⚠️ 미매칭 항목만 보기"], horizontal=True)
     if filter_option == "❌ 불일치(오류) 항목만 보기":
         display_df = result_df[result_df["검증 상태"] == "❌ 불일치(오류)"]
