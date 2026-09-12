@@ -39,7 +39,7 @@ st.markdown("""
         background-color: #FFFFFF;
         border: 1px solid #E2E8F0;
         border-radius: 10px;
-        padding: 14px 18px;
+        padding: 12px 16px;
         box-shadow: 0 1px 2px rgba(0,0,0,0.03);
     }
     .kpi-val {
@@ -47,34 +47,10 @@ st.markdown("""
         font-weight: 700;
         margin-top: 2px;
     }
-    .hub-card {
+    [data-testid="stDataFrame"] {
+        border-radius: 8px;
+        border: 1px solid #CBD5E1;
         background-color: #FFFFFF;
-        border: 1px solid #E2E8F0;
-        border-radius: 12px;
-        padding: 20px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.04);
-        min-height: 220px;
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-    }
-    .hub-card-title {
-        font-size: 17px;
-        font-weight: 700;
-        color: #0F172A;
-        margin-bottom: 6px;
-    }
-    .hub-card-desc {
-        font-size: 12.5px;
-        color: #64748B;
-        margin-bottom: 12px;
-    }
-    .hub-card-list {
-        font-size: 12px;
-        color: #334155;
-        line-height: 1.7;
-        margin-bottom: 14px;
-        padding-left: 18px;
     }
     .sub-box {
         background-color: #F1F5F9;
@@ -82,6 +58,16 @@ st.markdown("""
         padding: 12px 16px;
         border-radius: 6px;
         margin-bottom: 14px;
+    }
+    /* 카드 제목 클릭 버튼 스타일: 굵고 큰 제목처럼 표시 */
+    div.title-click-btn > button {
+        font-size: 18px !important;
+        font-weight: 700 !important;
+        text-align: left !important;
+        padding: 6px 12px !important;
+        border-radius: 8px !important;
+        display: flex !important;
+        justify-content: flex-start !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -98,7 +84,7 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # 결산 검증 프로젝트 테이블
+    # 1) 결산 검증 프로젝트 테이블
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,7 +116,7 @@ def init_db():
         )
     """)
     
-    # 기부금 수입 테이블
+    # 2) 기부금 수입 테이블
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS donation_receipts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,7 +139,7 @@ def init_db():
         )
     """)
     
-    # 기부금 지출 테이블 (수입 건 1:1 매핑)
+    # 3) 기부금 지출 테이블
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS donation_expenses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -242,14 +228,14 @@ with m_col4:
 st.markdown("<hr style='margin-top:6px; margin-bottom:18px; border-color:#E2E8F0;'>", unsafe_allow_html=True)
 
 # ==========================================
-# PAGE 1: 🏠 홈 대시보드 (오류 수정 및 미려한 카드 구성)
+# PAGE 1: 🏠 홈 대시보드 (제목 클릭 이동 반영)
 # ==========================================
 if st.session_state.current_page == "HOME":
     st.markdown("""
     <div style="background-color:#EEF2FF; border:1px solid #C7D2FE; border-radius:12px; padding:18px 22px; margin-bottom:22px;">
         <div style="font-size:18px; font-weight:700; color:#1E1B4B;">반갑습니다, 교직원 업무 포털입니다 👋</div>
         <div style="font-size:13.5px; color:#4338CA; margin-top:4px;">
-            수행하실 업무 카드를 선택하면 해당 작업 환경으로 바로 이동합니다.
+            원하시는 <b>시스템 제목을 클릭</b>하시면 해당 프로그램으로 바로 이동합니다.
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -257,96 +243,80 @@ if st.session_state.current_page == "HOME":
     st.markdown("#### 📂 주요 업무 시스템 바로가기")
     c_card1, c_card2 = st.columns(2)
     
-    # 1번 카드: 결산 데이터 스마트 검증기
+    # 1번 카드: 결산 데이터 스마트 검증기 (제목 클릭 방식)
     with c_card1:
-        st.markdown("""
-        <div class="hub-card" style="border-left: 5px solid #2563EB;">
-            <div>
-                <div class="hub-card-title">📊 결산 데이터 스마트 검증기</div>
-                <div class="hub-card-desc">학교 결산 원장 ↔ 사학진흥재단 양식 크로스체크</div>
-                <ul class="hub-card-list">
-                    <li>대학 본결산 엑셀 시트 자동 로드 및 실시간 금액 대조</li>
-                    <li>지능형 계정 매칭 엔진 & 1클릭 차액 오류 원인 진단</li>
-                    <li>엑셀형 대용량 스프레드시트 인라인 편집 및 DB 영구 저장</li>
-                </ul>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
-        if st.button("📊 결산 검증기 시작하기 ➔", key="btn_go_closing_clean", type="primary", use_container_width=True):
-            st.session_state.current_page = "CLOSING"
-            st.rerun()
+        with st.container(border=True):
+            st.markdown('<div class="title-click-btn">', unsafe_allow_html=True)
+            if st.button("📊 결산 데이터 스마트 검증기 ➔", key="title_click_closing", use_container_width=True, type="primary"):
+                st.session_state.current_page = "CLOSING"
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.caption("학교 결산 원장 ↔ 사학진흥재단 양식 크로스체크")
+            st.markdown("""
+            * 대학 본결산 엑셀 시트 자동 로드 및 실시간 금액 대조
+            * 지능형 계정 매칭 엔진 & 1클릭 차액 오차 원인 진단
+            * 엑셀형 대용량 스프레드시트 인라인 편집 및 DB 영구 보존
+            """)
 
-    # 2번 카드: 기부금 관리 시스템
+    # 2번 카드: 기부금 관리 시스템 (제목 클릭 방식)
     with c_card2:
-        st.markdown("""
-        <div class="hub-card" style="border-left: 5px solid #059669;">
-            <div>
-                <div class="hub-card-title">🎁 기부금 관리 시스템</div>
-                <div class="hub-card-desc">대학 및 법인 기부금 수입·원천별 지출·발급명세 통합 관리</div>
-                <ul class="hub-card-list">
-                    <li>대학 회계 / 법인 회계 작업 환경 완벽 분리 선택</li>
-                    <li>수입 건 하단에서 바로 지출을 등록하는 1:1 매핑 관리</li>
-                    <li>국세청 법정 영수증 & 용도별 집행 정산표 엑셀 다운로드</li>
-                </ul>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
-        if st.button("🎁 기부금 시스템 (회계선택) ➔", key="btn_go_donation_clean", type="primary", use_container_width=True):
-            st.session_state.current_page = "DONATION_SELECT"
-            st.rerun()
+        with st.container(border=True):
+            st.markdown('<div class="title-click-btn">', unsafe_allow_html=True)
+            if st.button("🎁 기부금 관리 시스템 ➔", key="title_click_donation", use_container_width=True, type="primary"):
+                st.session_state.current_page = "DONATION_SELECT"
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.caption("대학 및 법인 기부금 수입·원천별 지출·발급명세 통합 관리")
+            st.markdown("""
+            * 대학 회계 / 법인 회계 작업 환경 완벽 분리 선택
+            * 수입 건 하단에서 바로 지출(수혜)을 등록하는 1:1 매핑 관리
+            * 국세청 법정 기부금영수증 & 용도별 집행 정산표 엑셀 다운로드
+            """)
 
 # ==========================================
-# PAGE 2: 🎁 기부금 관리 - 회계 분리 선택 화면
+# PAGE 2: 🎁 기부금 관리 - 회계 분리 선택 화면 (제목 클릭 반영)
 # ==========================================
 elif st.session_state.current_page == "DONATION_SELECT":
     st.markdown('<div class="main-app-title">🎁 기부금 관리 시스템 - 회계 선택</div>', unsafe_allow_html=True)
-    st.markdown('<div class="main-app-caption">대학 회계와 법인 회계는 회계적으로 철저히 분리 운영됩니다. 작업하실 회계를 선택해 주세요.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-app-caption">대학 회계와 법인 회계는 회계적으로 철저히 분리 운영됩니다. 작업하실 <b>회계 제목을 클릭</b>해 주세요.</div>', unsafe_allow_html=True)
 
     e_col1, e_col2 = st.columns(2)
     with e_col1:
-        st.markdown("""
-        <div class="hub-card" style="border-left: 5px solid #2563EB;">
-            <div>
-                <div class="hub-card-title">🏫 대학 회계 기부금 관리</div>
-                <div class="hub-card-desc">대학(교비회계)으로 접수된 일반/지정/현물 기부금 관리</div>
-                <ul class="hub-card-list">
-                    <li>장학기금, 학과발전기금, 시설확충기금 등 교비 기부금 전용</li>
-                    <li>기부자별 수입 등록 직후 하단에서 수혜자 대상 지출 즉시 등록</li>
-                    <li>국세청 법정 영수증(코드 10) 및 용도별 정산표 엑셀 다운로드</li>
-                </ul>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
-        if st.button("🏫 대학 회계 입장하기 ➔", key="btn_enter_univ", type="primary", use_container_width=True):
-            st.session_state.selected_entity = "UNIVERSITY"
-            st.session_state.current_page = "DONATION_WORKSPACE"
-            st.rerun()
+        with st.container(border=True):
+            st.markdown('<div class="title-click-btn">', unsafe_allow_html=True)
+            if st.button("🏫 대학 회계 기부금 관리 ➔", key="title_click_univ", use_container_width=True, type="primary"):
+                st.session_state.selected_entity = "UNIVERSITY"
+                st.session_state.current_page = "DONATION_WORKSPACE"
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.caption("대학(교비회계)으로 접수된 일반/지정/현물 기부금 전용")
+            st.markdown("""
+            * 장학기금, 학과발전기금, 시설확충기금 등 교비 기부금 전용
+            * 수입 등록 직후 하단에서 수혜자 대상 지출 즉시 등록
+            * 국세청 법정 영수증(코드 10) 및 용도별 정산표 엑셀 다운로드
+            """)
 
     with e_col2:
-        st.markdown("""
-        <div class="hub-card" style="border-left: 5px solid #7C3AED;">
-            <div>
-                <div class="hub-card-title">🏛️ 법인 회계 기부금 관리</div>
-                <div class="hub-card-desc">학교법인으로 접수된 기부금 및 법정부담금 전출 특화 관리</div>
-                <ul class="hub-card-list">
-                    <li>법인 발전기금 및 법인 지정기부금 독립 관리</li>
-                    <li><b>법정부담금 전출용</b> 기부금 수입 및 학교 전출 지출 매핑 관리</li>
-                    <li>법인 세무 신고용 영수증 및 발급명세서 생성</li>
-                </ul>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
-        if st.button("🏛️ 법인 회계 입장하기 ➔", key="btn_enter_found", type="primary", use_container_width=True):
-            st.session_state.selected_entity = "FOUNDATION"
-            st.session_state.current_page = "DONATION_WORKSPACE"
-            st.rerun()
+        with st.container(border=True):
+            st.markdown('<div class="title-click-btn">', unsafe_allow_html=True)
+            if st.button("🏛️ 법인 회계 기부금 관리 ➔", key="title_click_found", use_container_width=True, type="primary"):
+                st.session_state.selected_entity = "FOUNDATION"
+                st.session_state.current_page = "DONATION_WORKSPACE"
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.caption("학교법인으로 접수된 기부금 및 법정부담금 전출 특화 관리")
+            st.markdown("""
+            * 법인 발전기금 및 법인 지정기부금 독립 관리
+            * **법정부담금 전출용** 기부금 수입 및 학교 전출 지출 매핑 관리
+            * 법인 세무 신고용 영수증 및 발급명세서 생성
+            """)
 
 # ==========================================
-# PAGE 3: 🎁 기부금 관리 - 독립 작업 화면 (수입 하단 원스톱 지출 등록)
+# PAGE 3: 🎁 기부금 관리 - 독립 작업 화면
 # ==========================================
 elif st.session_state.current_page == "DONATION_WORKSPACE":
     current_entity = st.session_state.selected_entity or "UNIVERSITY"
@@ -395,9 +365,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         "📊 용도별 집행 정산표 및 서식 출력"
     ])
 
-    # ----------------------------------------------------
-    # TAB 1: 수입 등록 + 하단 지출 등록
-    # ----------------------------------------------------
     with tab_manage:
         with st.expander("➕ 새 기부금 수입 등록 (클릭하여 열기/접기)", expanded=True):
             with st.form(key="form_donation_income_unified"):
@@ -465,12 +432,13 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                         conn.close()
                         
                         st.session_state.selected_receipt_id_for_expense = new_receipt_id
-                        st.success(f"[{donor_name}] 님의 기부금 ({d_amt:,.0f}원) 등록 완료! 아래 하단에서 지출을 바로 입력할 수 있습니다.")
+                        st.success(f"[{donor_name}] 님의 기부금 ({d_amt:,.0f}원)이 등록되었습니다! 아래 하단에서 지출을 바로 입력할 수 있습니다.")
                         st.rerun()
                     else:
                         st.warning("기부자 성명과 금액을 올바르게 입력해 주세요.")
 
         st.markdown("##### 📋 기부금 수입 내역 (클릭하여 하단 지출 입력 대상으로 지정)")
+        
         exp_totals = {}
         if not expenses_df.empty:
             for r_id, grp in expenses_df.groupby('receipt_id'):
@@ -510,10 +478,9 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             st.dataframe(
                 summary_table_df.drop(columns=['수입ID']),
                 use_container_width=True,
-                height=220
+                height=240
             )
 
-            # 하단 지출 입력부
             curr_target_row = summary_table_df[summary_table_df['수입ID'] == sel_r_id].iloc[0]
             curr_rem_amt = int(curr_target_row['남은잔액(원)'])
 
@@ -563,7 +530,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                             ))
                             conn.commit()
                             conn.close()
-                            st.success(f"[{curr_target_row['기부자명']} 님의 기부금]에서 [{e_beneficiary} 님에게 {e_amt:,.0f}원 지출] 등록 완료!")
+                            st.success(f"[{curr_target_row['기부자명']} 님의 기부금]에서 [{e_beneficiary} 님에게 {e_amt:,.0f}원 지출]이 성공적으로 연결되었습니다!")
                             st.rerun()
                     else:
                         st.warning("수혜자와 지출 금액을 올바르게 입력해 주세요.")
@@ -577,7 +544,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             else:
                 st.caption(f"아직 {curr_target_row['기부자명']} 님의 기부금에서 집행된 지출 내역이 없습니다.")
 
-            # 전체 수입-지출 1:1 매핑 통합 원장 엑셀 다운로드
             st.markdown("---")
             st.markdown("##### 📥 수입-지출 1:1 매핑 종합 대장 엑셀 다운로드")
             
@@ -632,9 +598,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         else:
             st.info("등록된 기부금 수입이 없습니다. 상단에서 기부금을 먼저 등록해 주세요.")
 
-    # ----------------------------------------------------
-    # TAB 2: 용도별 집행 정산표 & 국세청 서식 (엑셀 다운로드 포함)
-    # ----------------------------------------------------
     with tab_reports:
         st.markdown("#### 1. 📊 사용 용도별 집행 정산표")
         st.caption("기부금 수입 당시 지정된 용도별로 총 수입, 총 지출, 집행 잔액 및 집행률을 실시간 결산합니다.")
