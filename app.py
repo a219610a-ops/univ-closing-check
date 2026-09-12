@@ -5,14 +5,15 @@ import io
 import difflib
 import re
 import json
+import hashlib
 from datetime import datetime
 
 # ==========================================
-# 1. 페이지 기본 설정 및 엑셀 그리드 전용 스타일
+# 1. 페이지 기본 설정 및 모던 스타일
 # ==========================================
 st.set_page_config(
-    page_title="데이터 스마트 검증기",
-    page_icon="📊",
+    page_title="대학 행정 스마트 통합 포털",
+    page_icon="🏛️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -21,6 +22,16 @@ st.markdown("""
 <style>
     .stApp {
         background-color: #F8FAFC;
+    }
+    .portal-top-bar {
+        background-color: #FFFFFF;
+        border-bottom: 1px solid #E2E8F0;
+        padding: 10px 18px;
+        margin-bottom: 16px;
+        border-radius: 10px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
     }
     .main-app-title {
         font-size: 21px !important;
@@ -55,7 +66,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. SQLite 데이터베이스 초기화 및 설정 테이블 확장
+# 2. SQLite DB 초기화 (결산 검증 + 기부금 관리 통합)
 # ==========================================
 def get_db_connection():
     conn = sqlite3.connect("accounting_audit.db", check_same_thread=False)
@@ -66,6 +77,7 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
+    # 1) 결산 검증 프로젝트 테이블
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,7 +85,6 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
-    
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS account_mappings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,7 +94,6 @@ def init_db():
             UNIQUE(source_name, target_name)
         )
     """)
-        
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS project_workspaces (
             project_id INTEGER PRIMARY KEY,
@@ -99,831 +109,891 @@ def init_db():
         )
     """)
     
-    cursor.execute("PRAGMA table_info(project_workspaces)")
-    cols = [c[1] for c in cursor.fetchall()]
-    for col_name, col_type in [
-        ("source_raw_blob", "BLOB"),
-        ("target_raw_blob", "BLOB"),
-        ("source_sheet_name", "TEXT"),
-        ("target_sheet_name", "TEXT"),
-        ("settings_json", "TEXT")
-    ]:
-        if col_name not in cols:
-            try:
-                cursor.execute(f"ALTER TABLE project_workspaces ADD COLUMN {col_name} {col_type}")
-            except Exception:
-                pass
-
+    # 2) 기부금 관리 테이블 (대학/법인 완전 분리)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS donation_receipts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL, -- 'UNIVERSITY' or 'FOUNDATION'
+            donation_date TEXT NOT NULL,
+            budget_subject TEXT NOT NULL, -- 일반기부금, 지정기부금, 현물기부금
+            purpose TEXT NOT NULL, -- 사용 용도 (직접입력)
+            donor_main_type TEXT NOT NULL, -- 개인, 기업체, 단체및기관
+            donor_sub_type TEXT NOT NULL, -- 교직원, 일반인, 기업체, 단체및기관
+            donor_name TEXT NOT NULL,
+            id_number_masked TEXT NOT NULL,
+            id_number_cipher TEXT NOT NULL,
+            donation_type TEXT NOT NULL, -- 금전, 현물
+            code TEXT NOT NULL, -- 10 등
+            amount REAL NOT NULL,
+            receipt_no TEXT NOT NULL, -- YY-NN
+            receipt_date TEXT NOT NULL,
+            is_statutory_transfer INTEGER DEFAULT 0, -- 법정부담금 전출용 여부 (0: 일반, 1: 법정부담금전출)
+            created_at TEXT NOT NULL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS donation_expenses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL, -- 'UNIVERSITY' or 'FOUNDATION'
+            expense_date TEXT NOT NULL,
+            beneficiary TEXT NOT NULL, -- 수혜자
+            content TEXT NOT NULL, -- 수혜 내용
+            purpose TEXT NOT NULL, -- 대응 용도
+            amount REAL NOT NULL,
+            is_statutory_transfer INTEGER DEFAULT 0, -- 법정부담금 전출 지출 여부
+            created_at TEXT NOT NULL
+        )
+    """)
+    
     conn.commit()
     conn.close()
 
 init_db()
 
-def get_projects():
-    conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM projects ORDER BY id DESC", conn)
-    conn.close()
-    return df
+# 보안 마스킹 및 암호화 도우미
+def mask_id_number(raw_id):
+    if not raw_id:
+        return ""
+    clean = str(raw_id).strip().replace("-", "")
+    if len(clean) == 13: # 주민등록번호
+        return f"{clean[:6]}-{clean[6]}******"
+    elif len(clean) == 10: # 사업자등록번호
+        return f"{clean[:3]}-{clean[3:5]}-{clean[5:]}"
+    return f"{clean[:6]}******" if len(clean) > 6 else clean
 
-def create_project(name):
+def simple_encrypt(raw_text):
+    if not raw_text:
+        return ""
+    # SHA-256 기반 단방향 해시로 안전 저장 (필요 시 복호화 키 연동 가능 구조)
+    return hashlib.sha256(raw_text.encode('utf-8')).hexdigest()
+
+# 발급번호 자동 채번 (YY-NN)
+def generate_receipt_no(entity_type):
     conn = get_db_connection()
     cursor = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        cursor.execute("INSERT INTO projects (name, created_at) VALUES (?, ?)", (name, now))
-        new_id = cursor.lastrowid
-        cursor.execute("""
-            INSERT INTO project_workspaces (project_id, left_label, right_label, settings_json, updated_at)
-            VALUES (?, '학교 양식', '재단 양식', '{}', ?)
-        """, (new_id, now))
-        conn.commit()
-        success = True
-    except sqlite3.IntegrityError:
-        success = False
-    conn.close()
-    return success
-
-def rename_project(project_id, new_name):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("UPDATE projects SET name = ? WHERE id = ?", (new_name.strip(), project_id))
-        conn.commit()
-        success = True
-    except sqlite3.IntegrityError:
-        success = False
-    conn.close()
-    return success
-
-def delete_project(project_id):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-    conn.commit()
-    conn.close()
-
-def get_workspace_files(project_id):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    yy = datetime.now().strftime("%y")
     cursor.execute("""
-        SELECT left_label, right_label, source_raw_blob, target_raw_blob, 
-               source_sheet_name, target_sheet_name, settings_json 
-        FROM project_workspaces WHERE project_id = ?
-    """, (project_id,))
+        SELECT receipt_no FROM donation_receipts 
+        WHERE entity_type = ? AND receipt_no LIKE ? 
+        ORDER BY id DESC LIMIT 1
+    """, (entity_type, f"{yy}-%"))
     row = cursor.fetchone()
     conn.close()
-    if row:
-        settings = {}
+    
+    if row and row[0]:
         try:
-            if row[6]:
-                settings = json.loads(row[6])
+            last_seq = int(row[0].split("-")[1])
+            new_seq = last_seq + 1
+        except Exception:
+            new_seq = 1
+    else:
+        new_seq = 1
+    return f"{yy}-{new_seq:02d}"
+
+# ==========================================
+# 3. 글로벌 상단 미니 메뉴바 및 페이지 라우팅
+# ==========================================
+if "current_page" not in st.session_state:
+    st.session_state.current_page = "HOME"
+
+# 상단 미니 메뉴바 (어디서나 1클릭 이동)
+m_col1, m_col2, m_col3, m_col4 = st.columns([3.5, 1.2, 1.6, 1.4])
+with m_col1:
+    st.markdown("<h4 style='margin:0; color:#0F172A;'>🏛️ 대학 행정 스마트 통합 포털</h4>", unsafe_allow_html=True)
+with m_col2:
+    if st.button("🏠 홈 대시보드", use_container_width=True, type="primary" if st.session_state.current_page == "HOME" else "secondary"):
+        st.session_state.current_page = "HOME"
+        st.rerun()
+with m_col3:
+    if st.button("📊 결산 데이터 스마트 검증기", use_container_width=True, type="primary" if st.session_state.current_page == "CLOSING" else "secondary"):
+        st.session_state.current_page = "CLOSING"
+        st.rerun()
+with m_col4:
+    if st.button("🎗️ 기부금 관리 시스템", use_container_width=True, type="primary" if st.session_state.current_page == "DONATION" else "secondary"):
+        st.session_state.current_page = "DONATION"
+        st.rerun()
+
+st.markdown("<hr style='margin-top:6px; margin-bottom:18px; border-color:#E2E8F0;'>", unsafe_allow_html=True)
+
+# ==========================================
+# PAGE 1: 🏠 포털 메인 홈 대시보드
+# ==========================================
+if st.session_state.current_page == "HOME":
+    st.markdown("""
+    <div style="background-color:#EEF2FF; border:1px solid #C7D2FE; border-radius:12px; padding:18px 22px; margin-bottom:22px;">
+        <div style="font-size:18px; font-weight:700; color:#1E1B4B;">반갑습니다, 교직원 업무 포털입니다 👋</div>
+        <div style="font-size:13.5px; color:#4338CA; margin-top:4px;">
+            원하시는 업무 카드를 클릭하시면 해당 작업 화면으로 즉시 연결됩니다.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("#### 📂 주요 업무 시스템 바로가기")
+    
+    c_card1, c_card2 = st.columns(2)
+    
+    with c_card1:
+        st.markdown("""
+        <div class="kpi-card" style="border-left: 5px solid #2563EB; min-height: 250px;">
+            <div style="display:flex; align-items:center; gap:10px;">
+                <span style="font-size:26px;">📊</span>
+                <div>
+                    <div style="font-size:17px; font-weight:700; color:#0F172A;">결산 데이터 스마트 검증기</div>
+                    <div style="font-size:12px; color:#64748B;">학교 결산 원장 ↔ 사학진흥재단 양식 크로스체크</div>
+                </div>
+            </div>
+            <hr style="margin:12px 0; border-color:#F1F5F9;">
+            <ul style="font-size:12.5px; color:#334155; line-height:1.7; padding-left:18px;">
+                <li>대학 본결산 엑셀 시트 자동 로드 및 실시간 금액 대조</li>
+                <li>지능형 계정 매칭 엔진 & 1클릭 차액 오차 원인 진단</li>
+                <li>엑셀형 스프레드시트 인라인 편집 및 DB 영구 보존</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+        if st.button("결산 검증기 시작하기 ➔", key="btn_go_closing", type="primary", use_container_width=True):
+            st.session_state.current_page = "CLOSING"
+            st.rerun()
+
+    with c_card2:
+        st.markdown("""
+        <div class="kpi-card" style="border-left: 5px solid #059669; min-height: 250px;">
+            <div style="display:flex; align-items:center; gap:10px;">
+                <span style="font-size:26px;">🎗️</span>
+                <div>
+                    <div style="font-size:17px; font-weight:700; color:#0F172A;">기부금 관리 시스템</div>
+                    <div style="font-size:12px; color:#64748B;">대학 및 법인 기부금 수입·지출·발급명세 통합 관리</div>
+                </div>
+            </div>
+            <hr style="margin:12px 0; border-color:#F1F5F9;">
+            <ul style="font-size:12.5px; color:#334155; line-height:1.7; padding-left:18px;">
+                <li><b>대학 회계 / 법인 회계</b> 데이터 완벽 격리 모드 지원</li>
+                <li><b>국세청 표준 법정 영수증</b> 엑셀 다운로드 (로컬 직인 날인 가능)</li>
+                <li>용도별 실시간 집행 잔액 집계 및 <b>법정부담금 전출 특화 관리</b></li>
+                <li>주민등록번호 마스킹 및 강력한 보안 조치 적용</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+        if st.button("기부금 시스템 시작하기 ➔", key="btn_go_donation", type="primary", use_container_width=True):
+            st.session_state.current_page = "DONATION"
+            st.rerun()
+
+# ==========================================
+# PAGE 2: 📊 결산 데이터 스마트 검증기
+# ==========================================
+elif st.session_state.current_page == "CLOSING":
+    # ---------------- 결산 검증 로직 함수 ----------------
+    def get_projects():
+        conn = get_db_connection()
+        df = pd.read_sql_query("SELECT * FROM projects ORDER BY id DESC", conn)
+        conn.close()
+        return df
+
+    def create_project(name):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            cursor.execute("INSERT INTO projects (name, created_at) VALUES (?, ?)", (name, now))
+            new_id = cursor.lastrowid
+            cursor.execute("""
+                INSERT INTO project_workspaces (project_id, left_label, right_label, settings_json, updated_at)
+                VALUES (?, '학교 양식', '재단 양식', '{}', ?)
+            """, (new_id, now))
+            conn.commit()
+            success = True
+        except sqlite3.IntegrityError:
+            success = False
+        conn.close()
+        return success
+
+    def rename_project(project_id, new_name):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("UPDATE projects SET name = ? WHERE id = ?", (new_name.strip(), project_id))
+            conn.commit()
+            success = True
+        except sqlite3.IntegrityError:
+            success = False
+        conn.close()
+        return success
+
+    def delete_project(project_id):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        conn.commit()
+        conn.close()
+
+    def get_workspace_files(project_id):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT left_label, right_label, source_raw_blob, target_raw_blob, 
+                   source_sheet_name, target_sheet_name, settings_json 
+            FROM project_workspaces WHERE project_id = ?
+        """, (project_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            settings = {}
+            try:
+                if row[6]:
+                    settings = json.loads(row[6])
+            except Exception:
+                pass
+            return {
+                "left_label": row[0] or "학교 양식",
+                "right_label": row[1] or "재단 양식",
+                "source_raw_blob": row[2],
+                "target_raw_blob": row[3],
+                "source_sheet_name": row[4],
+                "target_sheet_name": row[5],
+                "settings": settings
+            }
+        return {"left_label": "학교 양식", "right_label": "재단 양식", "source_raw_blob": None, "target_raw_blob": None, "source_sheet_name": None, "target_sheet_name": None, "settings": {}}
+
+    def update_workspace_file_blob(project_id, side, file_bytes, default_sheet=None):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        blob_col = "source_raw_blob" if side == "source" else "target_raw_blob"
+        sheet_col = "source_sheet_name" if side == "source" else "target_sheet_name"
+        if default_sheet:
+            cursor.execute(f"UPDATE project_workspaces SET {blob_col} = ?, {sheet_col} = ?, updated_at = ? WHERE project_id = ?", (file_bytes, default_sheet, now, project_id))
+        else:
+            cursor.execute(f"UPDATE project_workspaces SET {blob_col} = ?, updated_at = ? WHERE project_id = ?", (file_bytes, now, project_id))
+        conn.commit()
+        conn.close()
+
+    def update_workspace_sheet_choice(project_id, side, sheet_name):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        col_name = "source_sheet_name" if side == "source" else "target_sheet_name"
+        cursor.execute(f"UPDATE project_workspaces SET {col_name} = ?, updated_at = ? WHERE project_id = ?", (sheet_name, now, project_id))
+        conn.commit()
+        conn.close()
+
+    def update_workspace_labels(project_id, left_label, right_label):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("UPDATE project_workspaces SET left_label = ?, right_label = ?, updated_at = ? WHERE project_id = ?", (left_label, right_label, now, project_id))
+        conn.commit()
+        conn.close()
+
+    def save_workspace_settings(project_id, settings_dict):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        s_str = json.dumps(settings_dict, ensure_ascii=False)
+        cursor.execute("UPDATE project_workspaces SET settings_json = ?, updated_at = ? WHERE project_id = ?", (s_str, now, project_id))
+        conn.commit()
+        conn.close()
+
+    def reset_workspace_data(project_id):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("UPDATE project_workspaces SET source_raw_blob = NULL, target_raw_blob = NULL, source_sheet_name = NULL, target_sheet_name = NULL, settings_json = '{}', updated_at = ? WHERE project_id = ?", (now, project_id))
+        conn.commit()
+        conn.close()
+
+    def get_saved_mappings():
+        conn = get_db_connection()
+        mapping_dict = {}
+        try:
+            df = pd.read_sql_query("SELECT source_name, target_name FROM account_mappings", conn)
+            mapping_dict = dict(zip(df['source_name'], df['target_name']))
         except Exception:
             pass
-        return {
-            "left_label": row[0] or "학교 양식",
-            "right_label": row[1] or "재단 양식",
-            "source_raw_blob": row[2],
-            "target_raw_blob": row[3],
-            "source_sheet_name": row[4],
-            "target_sheet_name": row[5],
-            "settings": settings
-        }
-    return {
-        "left_label": "학교 양식", "right_label": "재단 양식",
-        "source_raw_blob": None, "target_raw_blob": None,
-        "source_sheet_name": None, "target_sheet_name": None,
-        "settings": {}
-    }
+        finally:
+            conn.close()
+        return mapping_dict
 
-def update_workspace_file_blob(project_id, side, file_bytes, default_sheet=None):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    blob_col = "source_raw_blob" if side == "source" else "target_raw_blob"
-    sheet_col = "source_sheet_name" if side == "source" else "target_sheet_name"
-    
-    if default_sheet:
-        cursor.execute(f"""
-            UPDATE project_workspaces 
-            SET {blob_col} = ?, {sheet_col} = ?, updated_at = ?
-            WHERE project_id = ?
-        """, (file_bytes, default_sheet, now, project_id))
-    else:
-        cursor.execute(f"""
-            UPDATE project_workspaces 
-            SET {blob_col} = ?, updated_at = ?
-            WHERE project_id = ?
-        """, (file_bytes, now, project_id))
-    conn.commit()
-    conn.close()
-
-def update_workspace_sheet_choice(project_id, side, sheet_name):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    col_name = "source_sheet_name" if side == "source" else "target_sheet_name"
-    cursor.execute(f"""
-        UPDATE project_workspaces 
-        SET {col_name} = ?, updated_at = ?
-        WHERE project_id = ?
-    """, (sheet_name, now, project_id))
-    conn.commit()
-    conn.close()
-
-def update_workspace_labels(project_id, left_label, right_label):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute("""
-        UPDATE project_workspaces 
-        SET left_label = ?, right_label = ?, updated_at = ?
-        WHERE project_id = ?
-    """, (left_label, right_label, now, project_id))
-    conn.commit()
-    conn.close()
-
-def save_workspace_settings(project_id, settings_dict):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    s_str = json.dumps(settings_dict, ensure_ascii=False)
-    cursor.execute("""
-        UPDATE project_workspaces
-        SET settings_json = ?, updated_at = ?
-        WHERE project_id = ?
-    """, (s_str, now, project_id))
-    conn.commit()
-    conn.close()
-
-def reset_workspace_data(project_id):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute("""
-        UPDATE project_workspaces 
-        SET source_raw_blob = NULL, target_raw_blob = NULL, 
-            source_sheet_name = NULL, target_sheet_name = NULL, 
-            settings_json = '{}', updated_at = ? 
-        WHERE project_id = ?
-    """, (now, project_id))
-    conn.commit()
-    conn.close()
-
-def get_saved_mappings():
-    conn = get_db_connection()
-    mapping_dict = {}
-    try:
-        df = pd.read_sql_query("SELECT source_name, target_name FROM account_mappings", conn)
-        mapping_dict = dict(zip(df['source_name'], df['target_name']))
-    except Exception:
-        pass
-    finally:
+    def save_batch_mappings(mapping_dict):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for s_name, t_name in mapping_dict.items():
+            if s_name and t_name and t_name != "(매칭 제외)":
+                cursor.execute("""
+                    INSERT INTO account_mappings (source_name, target_name, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(source_name, target_name) 
+                    DO UPDATE SET updated_at=excluded.updated_at
+                """, (s_name.strip(), t_name.strip(), now))
+        conn.commit()
         conn.close()
-    return mapping_dict
 
-def save_batch_mappings(mapping_dict):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    for s_name, t_name in mapping_dict.items():
-        if s_name and t_name and t_name != "(매칭 제외)":
-            cursor.execute("""
-                INSERT INTO account_mappings (source_name, target_name, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(source_name, target_name) 
-                DO UPDATE SET updated_at=excluded.updated_at
-            """, (s_name.strip(), t_name.strip(), now))
-    conn.commit()
-    conn.close()
+    EXCLUDE_KEYWORDS = ["총계", "합계", "소계", "차기이월", "전기이월", "이월자금", "수입총계", "지출총계"]
+    def is_aggregate_account(name):
+        return any(kw in name for kw in EXCLUDE_KEYWORDS)
 
-# ==========================================
-# 3. 고도화된 정밀 스마트 매칭 엔진
-# ==========================================
-EXCLUDE_KEYWORDS = ["총계", "합계", "소계", "차기이월", "전기이월", "이월자금", "수입총계", "지출총계"]
+    def clean_account_name(raw_name):
+        if pd.isna(raw_name): return ""
+        text = str(raw_name).strip()
+        text = re.sub(r'^[0-9\.\-\_\(\)\[\]\s]+', '', text)
+        clean_text = re.sub(r'[\s\.\-\_\(\)\[\]]+', '', text)
+        return clean_text if clean_text else text
 
-def is_aggregate_account(name):
-    for kw in EXCLUDE_KEYWORDS:
-        if kw in name:
-            return True
-    return False
+    def clean_number(val):
+        if pd.isna(val): return 0.0
+        if isinstance(val, (int, float)): return float(val)
+        try: return float(str(val).replace(",", "").strip())
+        except ValueError: return 0.0
 
-def clean_account_name(raw_name):
-    if pd.isna(raw_name):
-        return ""
-    text = str(raw_name).strip()
-    text = re.sub(r'^[0-9\.\-\_\(\)\[\]\s]+', '', text)
-    clean_text = re.sub(r'[\s\.\-\_\(\)\[\]]+', '', text)
-    return clean_text if clean_text else text
-
-def clean_number(val):
-    if pd.isna(val):
-        return 0.0
-    if isinstance(val, (int, float)):
-        return float(val)
-    val_str = str(val).replace(",", "").strip()
-    try:
-        return float(val_str)
-    except ValueError:
-        return 0.0
-
-def find_smart_match(source_name, target_options, target_clean_dict, saved_history):
-    if source_name in saved_history and saved_history[source_name] in target_options:
-        return saved_history[source_name], "💾 DB기억"
-        
-    src_clean = clean_account_name(source_name)
-    if not src_clean:
-        return "(매칭 제외)", "미매칭"
-        
-    for raw_target, clean_target in target_clean_dict.items():
-        if is_aggregate_account(raw_target):
-            continue
-        if src_clean == clean_target:
-            return raw_target, "🎯 순수일치"
-
-    if len(src_clean) >= 3:
+    def find_smart_match(source_name, target_options, target_clean_dict, saved_history):
+        if source_name in saved_history and saved_history[source_name] in target_options:
+            return saved_history[source_name], "💾 DB기억"
+        src_clean = clean_account_name(source_name)
+        if not src_clean: return "(매칭 제외)", "미매칭"
         for raw_target, clean_target in target_clean_dict.items():
-            if is_aggregate_account(raw_target):
-                continue
-            if len(clean_target) >= 3:
-                if src_clean in clean_target or clean_target in src_clean:
+            if is_aggregate_account(raw_target): continue
+            if src_clean == clean_target: return raw_target, "🎯 순수일치"
+        if len(src_clean) >= 3:
+            for raw_target, clean_target in target_clean_dict.items():
+                if is_aggregate_account(raw_target): continue
+                if len(clean_target) >= 3 and (src_clean in clean_target or clean_target in src_clean):
                     return raw_target, "🔍 정밀포함"
+        valid_targets = [raw for raw in target_options if raw != "(매칭 제외)" and not is_aggregate_account(raw)]
+        valid_clean_map = {target_clean_dict[raw]: raw for raw in valid_targets if target_clean_dict.get(raw)}
+        matches = difflib.get_close_matches(src_clean, list(valid_clean_map.keys()), n=1, cutoff=0.75)
+        if matches: return valid_clean_map[matches[0]], "🤖 정밀추천"
+        return "(매칭 제외)", "미매칭"
 
-    valid_targets = [raw for raw in target_options if raw != "(매칭 제외)" and not is_aggregate_account(raw)]
-    valid_clean_map = {target_clean_dict[raw]: raw for raw in valid_targets if target_clean_dict.get(raw)}
-    
-    matches = difflib.get_close_matches(src_clean, list(valid_clean_map.keys()), n=1, cutoff=0.75)
-    if matches:
-        return valid_clean_map[matches[0]], "🤖 정밀추천"
-                
-    return "(매칭 제외)", "미매칭"
+    def get_all_row_candidates(df, name_col):
+        if df is None or df.empty or name_col not in df.columns: return ["(자동 감지)"]
+        all_names = [str(x).strip() for x in df[name_col].dropna().unique() if str(x).strip()]
+        pats = [r'자금수입총계', r'자금지출총계', r'수입총계', r'지출총계', r'총\s*계', r'합\s*계', r'수입합계', r'지출합계', r'계']
+        priority_pattern = re.compile('|'.join(pats))
+        priority_rows = [n for n in all_names if priority_pattern.search(n)]
+        normal_rows = [n for n in all_names if not priority_pattern.search(n)]
+        return ["(자동 감지)"] + sorted(priority_rows) + sorted(normal_rows)
 
-# ==========================================
-# 4. 스마트 공식 총계 추출 및 후보 탐색 함수
-# ==========================================
-def get_all_row_candidates(df, name_col):
-    if df is None or df.empty or name_col not in df.columns:
-        return ["(자동 감지)"]
-    
-    all_names = [str(x).strip() for x in df[name_col].dropna().unique() if str(x).strip()]
-    pats = [r'자금수입총계', r'자금지출총계', r'수입총계', r'지출총계', r'총\s*계', r'합\s*계', r'수입합계', r'지출합계', r'계']
-    priority_pattern = re.compile('|'.join(pats))
-    
-    priority_rows = []
-    normal_rows = []
-    for name in all_names:
-        if priority_pattern.search(name):
-            priority_rows.append(name)
-        else:
-            normal_rows.append(name)
-            
-    return ["(자동 감지)"] + sorted(priority_rows) + sorted(normal_rows)
+    def extract_smart_grand_total(df, name_col, amt_col, target_total_type="수입", forced_row=None):
+        if df is None or df.empty or name_col not in df.columns or amt_col not in df.columns:
+            return 0.0, "데이터 없음"
+        temp = df.dropna(subset=[name_col]).copy()
+        temp[name_col] = temp[name_col].astype(str).str.strip()
+        temp['__amt_clean'] = temp[amt_col].apply(clean_number)
+        if forced_row and forced_row != "(자동 감지)":
+            matched = temp[temp[name_col] == forced_row]
+            if not matched.empty: return float(matched.iloc[-1]['__amt_clean']), forced_row
 
-def extract_smart_grand_total(df, name_col, amt_col, target_total_type="수입", forced_row=None):
-    if df is None or df.empty or name_col not in df.columns or amt_col not in df.columns:
-        return 0.0, "데이터 없음"
-        
-    temp = df.dropna(subset=[name_col]).copy()
-    temp[name_col] = temp[name_col].astype(str).str.strip()
-    temp['__amt_clean'] = temp[amt_col].apply(clean_number)
-    
-    if forced_row and forced_row != "(자동 감지)":
-        matched = temp[temp[name_col] == forced_row]
-        if not matched.empty:
-            return float(matched.iloc[-1]['__amt_clean']), forced_row
+        patterns = [r'자금수입총계', r'수입총계', r'수입합계', r'총\s*계'] if "수입" in target_total_type else [r'자금지출총계', r'지출총계', r'지출합계', r'총\s*계']
+        for pat in patterns:
+            matched = temp[temp[name_col].str.contains(pat, regex=True, na=False)]
+            valid_rows = matched[matched['__amt_clean'] > 0]
+            if not valid_rows.empty:
+                chosen = valid_rows.iloc[-1]
+                return float(chosen['__amt_clean']), chosen[name_col]
 
-    if "수입" in target_total_type:
-        patterns = [r'자금수입총계', r'자금수입\s*총계', r'수입총계', r'수입\s*총계', r'수입합계', r'총\s*계']
-    elif "지출" in target_total_type:
-        patterns = [r'자금지출총계', r'자금지출\s*총계', r'지출총계', r'지출\s*총계', r'지출합계', r'총\s*계']
-    else:
-        patterns = [r'자금수입총계', r'자금지출총계', r'수입총계', r'지출총계', r'총\s*계']
-        
-    for pat in patterns:
-        matched = temp[temp[name_col].str.contains(pat, regex=True, na=False)]
-        valid_rows = matched[matched['__amt_clean'] > 0]
-        if not valid_rows.empty:
-            chosen = valid_rows.iloc[-1]
-            return float(chosen['__amt_clean']), chosen[name_col]
+        exclude_pattern = '|'.join(EXCLUDE_KEYWORDS)
+        pure_details = temp[~temp[name_col].str.contains(exclude_pattern, regex=True, na=False)]
+        return float(pure_details['__amt_clean'].sum()), "세부계정 순합계"
 
-    exclude_pattern = '|'.join(EXCLUDE_KEYWORDS)
-    pure_details = temp[~temp[name_col].str.contains(exclude_pattern, regex=True, na=False)]
-    
-    if "수입" in target_total_type:
-        s_income = pure_details[pure_details[name_col].str.contains(r'^(5\d{3}|수입)', regex=True, na=False)]
-        if not s_income.empty and s_income['__amt_clean'].sum() > 0:
-            return float(s_income['__amt_clean'].sum()), "수입계정(5천번대) 순합계"
-    elif "지출" in target_total_type:
-        s_expense = pure_details[pure_details[name_col].str.contains(r'^(4\d{3}|지출)', regex=True, na=False)]
-        if not s_expense.empty and s_expense['__amt_clean'].sum() > 0:
-            return float(s_expense['__amt_clean'].sum()), "지출계정(4천번대) 순합계"
-
-    pure_sum = pure_details['__amt_clean'].sum()
-    return float(pure_sum), "세부계정 순합계"
-
-# ==========================================
-# 5. 사이드바: 나열형 프로젝트 리스트
-# ==========================================
-projects_df = get_projects()
-
-with st.sidebar:
-    st.markdown("#### 📂 프로젝트 목록")
-    
-    with st.expander("➕ 새 프로젝트 추가", expanded=False):
-        new_proj_name = st.text_input("새 프로젝트명", placeholder="예: 2025 본결산", key="new_proj_input_side")
-        if st.button("추가", use_container_width=True, type="primary"):
-            if new_proj_name.strip():
-                if create_project(new_proj_name.strip()):
-                    st.query_params["project"] = new_proj_name.strip()
-                    st.success("추가되었습니다!")
-                    st.rerun()
-                else:
-                    st.error("이미 존재하는 프로젝트입니다.")
-            else:
-                st.warning("이름을 입력해 주세요.")
-                
-    st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
-    
-    if not projects_df.empty:
-        project_names = projects_df['name'].tolist()
-        
-        url_proj = st.query_params.get("project", None)
-        if url_proj not in project_names:
-            url_proj = project_names[0]
-            st.query_params["project"] = url_proj
-            
-        selected_project_name = url_proj
-        selected_row = projects_df[projects_df['name'] == selected_project_name].iloc[0]
-        curr_project_id = int(selected_row['id'])
-
-        for _, p_row in projects_df.iterrows():
-            p_id = int(p_row['id'])
-            p_name = p_row['name']
-            is_active = (p_name == selected_project_name)
-            
-            p_col1, p_col2 = st.columns([4, 1])
-            with p_col1:
-                btn_type = "primary" if is_active else "secondary"
-                prefix = "✓ " if is_active else "• "
-                if st.button(f"{prefix}{p_name}", key=f"sel_proj_{p_id}", type=btn_type, use_container_width=True):
-                    st.query_params["project"] = p_name
-                    st.rerun()
-                    
-            with p_col2:
-                with st.popover("✏️", help="프로젝트명 수정 및 삭제"):
-                    st.markdown(f"**[{p_name}] 관리**")
-                    new_pname = st.text_input("새 이름", value=p_name, key=f"inline_rename_{p_id}")
-                    if st.button("이름 저장", key=f"btn_save_rename_{p_id}", use_container_width=True):
-                        clean_name = new_pname.strip()
-                        if clean_name and clean_name != p_name:
-                            if rename_project(p_id, clean_name):
-                                if is_active:
-                                    st.query_params["project"] = clean_name
-                                st.success("변경 완료!")
-                                st.rerun()
-                            else:
-                                st.error("중복된 이름입니다.")
-                    
-                    st.markdown("<hr style='margin: 8px 0;'>", unsafe_allow_html=True)
-                    if st.button("🗑️ 프로젝트 삭제", key=f"btn_del_{p_id}", type="secondary", use_container_width=True):
-                        delete_project(p_id)
-                        if is_active and "project" in st.query_params:
-                            del st.query_params["project"]
-                        st.warning("삭제되었습니다.")
+    # 사이드바 프로젝트 관리
+    projects_df = get_projects()
+    with st.sidebar:
+        st.markdown("#### 📂 결산 프로젝트 목록")
+        with st.expander("➕ 새 프로젝트 추가", expanded=False):
+            new_proj_name = st.text_input("새 프로젝트명", placeholder="예: 2025 본결산", key="new_proj_input_side")
+            if st.button("추가", use_container_width=True, type="primary"):
+                if new_proj_name.strip():
+                    if create_project(new_proj_name.strip()):
+                        st.query_params["project"] = new_proj_name.strip()
                         st.rerun()
-    else:
-        selected_project_name = None
-        curr_project_id = None
-        st.info("새 프로젝트를 먼저 추가해 주세요.")
+                    else: st.error("이미 존재하는 프로젝트입니다.")
 
-# ==========================================
-# 6. 메인 화면 로직
-# ==========================================
-if not selected_project_name:
-    st.markdown('<div class="main-app-title">📊 데이터 스마트 검증기</div>', unsafe_allow_html=True)
-    st.info("👈 왼쪽 사이드바에서 새 프로젝트를 추가해 주세요.")
-    st.stop()
+        if not projects_df.empty:
+            project_names = projects_df['name'].tolist()
+            url_proj = st.query_params.get("project", None)
+            if url_proj not in project_names: url_proj = project_names[0]
+            selected_project_name = url_proj
+            curr_project_id = int(projects_df[projects_df['name'] == selected_project_name].iloc[0]['id'])
 
-workspace_files = get_workspace_files(curr_project_id)
-saved_settings = workspace_files.get("settings", {})
+            for _, p_row in projects_df.iterrows():
+                p_id = int(p_row['id'])
+                p_name = p_row['name']
+                is_active = (p_name == selected_project_name)
+                p_col1, p_col2 = st.columns([4, 1])
+                with p_col1:
+                    if st.button(f"{'✓ ' if is_active else '• '}{p_name}", key=f"sel_proj_{p_id}", type="primary" if is_active else "secondary", use_container_width=True):
+                        st.query_params["project"] = p_name
+                        st.rerun()
+                with p_col2:
+                    with st.popover("✏️"):
+                        new_pname = st.text_input("이름 변경", value=p_name, key=f"rename_{p_id}")
+                        if st.button("저장", key=f"save_r_{p_id}"):
+                            if rename_project(p_id, new_pname.strip()):
+                                st.query_params["project"] = new_pname.strip()
+                                st.rerun()
+                        if st.button("🗑️ 삭제", key=f"del_{p_id}"):
+                            delete_project(p_id)
+                            st.rerun()
+        else:
+            selected_project_name = None
+            curr_project_id = None
 
-h_col1, h_col2 = st.columns([4, 1])
-with h_col1:
+    if not selected_project_name:
+        st.info("👈 왼쪽 사이드바에서 새 프로젝트를 추가해 주세요.")
+        st.stop()
+
+    workspace_files = get_workspace_files(curr_project_id)
+    saved_settings = workspace_files.get("settings", {})
+
     st.markdown('<div class="main-app-title">📊 데이터 스마트 검증기</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="main-app-caption">📌 현재 프로젝트: <b>{selected_project_name}</b> | 양쪽 파일의 대상 시트를 자유롭게 선택해 검증할 수 있습니다.</div>', unsafe_allow_html=True)
-with h_col2:
-    if st.button("🔄 데이터 초기화", use_container_width=True):
-        reset_workspace_data(curr_project_id)
-        for k in list(st.session_state.keys()):
-            if k.startswith(f"match_override_{curr_project_id}_"):
-                del st.session_state[k]
-        st.success("데이터가 초기화되었습니다.")
-        st.rerun()
 
-# ----------------------------------------------------
-# 1단계: 엑셀 파일 업로드 및 상시 대상 시트 선택 (기본 펼침 유지)
-# ----------------------------------------------------
-source_blob = workspace_files["source_raw_blob"]
-target_blob = workspace_files["target_raw_blob"]
-source_df = None
-target_df = None
+    # 1단계: 파일 업로드 및 시트 선택
+    source_blob = workspace_files["source_raw_blob"]
+    target_blob = workspace_files["target_raw_blob"]
+    source_df = None
+    target_df = None
 
-with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 선택 (상시 변경 가능)", expanded=True):
-    lbl_c1, lbl_c2 = st.columns(2)
-    with lbl_c1:
-        left_label_input = st.text_input("기준 파일 라벨", value=workspace_files["left_label"], key=f"left_lbl_{curr_project_id}")
-    with lbl_c2:
-        right_label_input = st.text_input("대조 파일 라벨", value=workspace_files["right_label"], key=f"right_lbl_{curr_project_id}")
-
-    if (left_label_input != workspace_files["left_label"]) or (right_label_input != workspace_files["right_label"]):
-        update_workspace_labels(curr_project_id, left_label_input, right_label_input)
-        st.rerun()
-
-    f_col1, f_col2 = st.columns(2)
-
-    # 1) 기준 파일 (학교 양식)
-    with f_col1:
-        st.markdown(f"**🏫 {left_label_input} 파일**")
-        new_s_file = st.file_uploader(f"{left_label_input} 등록 (.xlsx, .xls)", type=["xlsx", "xls"], key=f"s_uploader_{curr_project_id}")
-        if new_s_file is not None:
-            bytes_val = new_s_file.getvalue()
-            if source_blob != bytes_val:
-                try:
-                    xl_test = pd.ExcelFile(io.BytesIO(bytes_val))
-                    init_sheet = xl_test.sheet_names[0]
-                    update_workspace_file_blob(curr_project_id, "source", bytes_val, default_sheet=init_sheet)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"엑셀 파일 읽기 실패: {e}")
-
-        if source_blob is not None:
-            try:
-                xl_s = pd.ExcelFile(io.BytesIO(source_blob))
-                s_sheet_names = xl_s.sheet_names
-                cur_s_sheet = workspace_files.get("source_sheet_name")
-                s_idx = s_sheet_names.index(cur_s_sheet) if cur_s_sheet in s_sheet_names else 0
-                
-                chosen_s_sheet = st.selectbox(
-                    f"📑 [{left_label_input}] 대상 시트 선택",
-                    s_sheet_names,
-                    index=s_idx,
-                    key=f"select_s_sheet_{curr_project_id}"
-                )
-                if chosen_s_sheet != cur_s_sheet:
-                    update_workspace_sheet_choice(curr_project_id, "source", chosen_s_sheet)
-                    st.rerun()
-
-                source_df = pd.read_excel(io.BytesIO(source_blob), sheet_name=chosen_s_sheet)
-                st.caption(f"✓ '{chosen_s_sheet}' 로드됨 ({len(source_df)}행)")
-            except Exception as e:
-                st.error(f"시트 로드 실패: {e}")
-        else:
-            st.info(f"👆 {left_label_input} 파일을 업로드해 주세요.")
-
-    # 2) 대조 파일 (재단 양식)
-    with f_col2:
-        st.markdown(f"**🏛️ {right_label_input} 파일**")
-        new_t_file = st.file_uploader(f"{right_label_input} 등록 (.xlsx, .xls)", type=["xlsx", "xls"], key=f"t_uploader_{curr_project_id}")
-        if new_t_file is not None:
-            bytes_val_t = new_t_file.getvalue()
-            if target_blob != bytes_val_t:
-                try:
-                    xl_test_t = pd.ExcelFile(io.BytesIO(bytes_val_t))
-                    init_sheet_t = xl_test_t.sheet_names[0]
-                    update_workspace_file_blob(curr_project_id, "target", bytes_val_t, default_sheet=init_sheet_t)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"엑셀 파일 읽기 실패: {e}")
-
-        if target_blob is not None:
-            try:
-                xl_t = pd.ExcelFile(io.BytesIO(target_blob))
-                t_sheet_names = xl_t.sheet_names
-                cur_t_sheet = workspace_files.get("target_sheet_name")
-                t_idx = t_sheet_names.index(cur_t_sheet) if cur_t_sheet in t_sheet_names else 0
-                
-                chosen_t_sheet = st.selectbox(
-                    f"📑 [{right_label_input}] 대상 시트 선택",
-                    t_sheet_names,
-                    index=t_idx,
-                    key=f"select_t_sheet_{curr_project_id}"
-                )
-                if chosen_t_sheet != cur_t_sheet:
-                    update_workspace_sheet_choice(curr_project_id, "target", chosen_t_sheet)
-                    st.rerun()
-
-                target_df = pd.read_excel(io.BytesIO(target_blob), sheet_name=chosen_t_sheet)
-                st.caption(f"✓ '{chosen_t_sheet}' 로드됨 ({len(target_df)}행)")
-            except Exception as e:
-                st.error(f"시트 로드 실패: {e}")
-        else:
-            st.info(f"👆 {right_label_input} 파일을 업로드해 주세요.")
-
-if source_df is None or target_df is None:
-    st.info("💡 1단계 카드에서 두 엑셀 파일을 업로드하고 [대상 시트]를 각각 선택해 주세요.")
-    st.stop()
-
-# ----------------------------------------------------
-# 2단계: 대조 열 및 총계 행 설정 (기본 펼침 유지)
-# ----------------------------------------------------
-source_cols = list(source_df.columns)
-target_cols = list(target_df.columns)
-
-def_s_name = saved_settings.get("s_name_col", source_cols[0] if source_cols else None)
-def_t_name = saved_settings.get("t_name_col", target_cols[0] if target_cols else None)
-def_s_amt = saved_settings.get("s_amt", source_cols[min(2, len(source_cols)-1)] if source_cols else None)
-def_t_amt = saved_settings.get("t_amt", target_cols[min(2, len(target_cols)-1)] if target_cols else None)
-def_s_tot = saved_settings.get("forced_s_total_row", "(자동 감지)")
-def_t_tot = saved_settings.get("forced_t_total_row", "(자동 감지)")
-
-with st.expander("⚙️ 2단계: 대조 열 및 양측 총계 행 설정 (자동 저장됨)", expanded=True):
-    col_c1, col_c2 = st.columns(2)
-    with col_c1:
-        s_name_idx = source_cols.index(def_s_name) if def_s_name in source_cols else 0
-        s_name_col = st.selectbox(f"{left_label_input} 항목명 열", source_cols, index=s_name_idx)
-    with col_c2:
-        t_name_idx = target_cols.index(def_t_name) if def_t_name in target_cols else 0
-        t_name_col = st.selectbox(f"{right_label_input} 항목명 열", target_cols, index=t_name_idx)
-
-    ac1, ac2 = st.columns(2)
-    with ac1:
-        s_amt_idx = source_cols.index(def_s_amt) if def_s_amt in source_cols else min(2, len(source_cols)-1)
-        s_amt = st.selectbox(f"비교할 금액 열 ({left_label_input})", source_cols, index=s_amt_idx)
-    with ac2:
-        t_amt_idx = target_cols.index(def_t_amt) if def_t_amt in target_cols else min(2, len(target_cols)-1)
-        t_amt = st.selectbox(f"비교할 금액 열 ({right_label_input})", target_cols, index=t_amt_idx)
-
-    st.markdown("---")
-    st.markdown("##### 📌 공식 총계 행 지정 (좌우 각각 선택 및 실시간 금액 확인)")
-
-    tc1, tc2 = st.columns(2)
-    s_candidates = get_all_row_candidates(source_df, s_name_col)
-    with tc1:
-        s_tot_idx = s_candidates.index(def_s_tot) if def_s_tot in s_candidates else 0
-        forced_s_total_row = st.selectbox(
-            f"🏫 [{left_label_input}] 총계 행 선택",
-            s_candidates,
-            index=s_tot_idx,
-            key=f"forced_s_tot_{curr_project_id}"
-        )
-        if forced_s_total_row != "(자동 감지)":
-            row_match = source_df[source_df[s_name_col].astype(str).str.strip() == forced_s_total_row]
-            if not row_match.empty:
-                preview_amt = clean_number(row_match.iloc[-1][s_amt])
-                st.caption(f"확인된 금액: **{preview_amt:,.0f} 원**")
-
-    t_candidates = get_all_row_candidates(target_df, t_name_col)
-    with tc2:
-        t_tot_idx = t_candidates.index(def_t_tot) if def_t_tot in t_candidates else 0
-        forced_t_total_row = st.selectbox(
-            f"🏛️ [{right_label_input}] 총계 행 선택",
-            t_candidates,
-            index=t_tot_idx,
-            key=f"forced_t_tot_{curr_project_id}"
-        )
-        if forced_t_total_row != "(자동 감지)":
-            row_match_t = target_df[target_df[t_name_col].astype(str).str.strip() == forced_t_total_row]
-            if not row_match_t.empty:
-                preview_amt_t = clean_number(row_match_t.iloc[-1][t_amt])
-                st.caption(f"확인된 금액: **{preview_amt_t:,.0f} 원**")
-
-    current_settings = {
-        "s_name_col": s_name_col,
-        "t_name_col": t_name_col,
-        "s_amt": s_amt,
-        "t_amt": t_amt,
-        "forced_s_total_row": forced_s_total_row,
-        "forced_t_total_row": forced_t_total_row
-    }
-    if current_settings != saved_settings:
-        save_workspace_settings(curr_project_id, current_settings)
-
-# ----------------------------------------------------
-# 3단계: 정밀 총계 산출 및 데이터 매칭
-# ----------------------------------------------------
-s_df_clean = source_df.dropna(subset=[s_name_col]).copy()
-t_df_clean = target_df.dropna(subset=[t_name_col]).copy()
-
-s_df_clean[s_name_col] = s_df_clean[s_name_col].astype(str).str.strip()
-t_df_clean[t_name_col] = t_df_clean[t_name_col].astype(str).str.strip()
-s_df_clean[s_amt] = s_df_clean[s_amt].apply(clean_number)
-t_df_clean[t_amt] = t_df_clean[t_amt].apply(clean_number)
-
-official_t_total, t_total_source_name = extract_smart_grand_total(
-    t_df_clean, t_name_col, t_amt, 
-    forced_row=forced_t_total_row
-)
-total_type = "수입" if "수입" in t_total_source_name else ("지출" if "지출" in t_total_source_name else "전체")
-
-official_s_total, s_total_source_name = extract_smart_grand_total(
-    s_df_clean, s_name_col, s_amt, 
-    target_total_type=total_type, 
-    forced_row=forced_s_total_row
-)
-grand_diff = official_s_total - official_t_total
-
-target_sum_lookup = {}
-for t_name, grp in t_df_clean.groupby(t_name_col):
-    target_sum_lookup[str(t_name).strip()] = grp[t_amt].sum()
-
-raw_target_list = sorted([str(x).strip() for x in t_df_clean[t_name_col].unique() if str(x).strip()])
-target_clean_dict = {raw_name: clean_account_name(raw_name) for raw_name in raw_target_list}
-target_options = ["(매칭 제외)"] + raw_target_list
-
-saved_history = get_saved_mappings()
-unique_source_items = sorted([str(x).strip() for x in s_df_clean[s_name_col].unique() if str(x).strip() and not is_aggregate_account(str(x))])
-
-matched_rows = []
-for s_name in unique_source_items:
-    state_key = f"match_override_{curr_project_id}_{re.sub(r'[^a-zA-Z0-9가-힣]', '_', s_name)}"
-    if state_key in st.session_state:
-        selected_match = st.session_state[state_key]
-        status_text = "✏️ 수동"
-    elif s_name in saved_history and saved_history[s_name] in target_options:
-        selected_match = saved_history[s_name]
-        status_text = "💾 저장됨"
-    else:
-        selected_match, status_text = find_smart_match(s_name, target_options, target_clean_dict, saved_history)
-
-    s_val = s_df_clean[s_df_clean[s_name_col] == s_name][s_amt].sum()
-    
-    if not selected_match or selected_match == "(매칭 제외)":
-        t_val = 0.0
-        diff = s_val
-        val_status = "⚠️ 미매칭"
-    else:
-        t_val = target_sum_lookup.get(selected_match, 0.0)
-        diff = s_val - t_val
-        val_status = "❌ 오류" if abs(diff) > 0.01 else "✅ 일치"
-
-    ai_hint = "-"
-    if val_status != "✅ 일치":
-        zero_diffs = [rt for rt, sv in target_sum_lookup.items() if not is_aggregate_account(rt) and abs(sv - s_val) < 1]
-        if zero_diffs:
-            ai_hint = f"👉 {zero_diffs[0]} (0원)"
-        else:
-            fuzzy_c = difflib.get_close_matches(clean_account_name(s_name), [clean_account_name(t) for t in raw_target_list if not is_aggregate_account(t)], n=1, cutoff=0.4)
-            if fuzzy_c:
-                raw_c = [t for t in raw_target_list if clean_account_name(t) == fuzzy_c[0]][0]
-                ai_hint = f"💡 {raw_c}"
-
-    matched_rows.append({
-        "상태": val_status,
-        f"{left_label_input} 항목명": s_name,
-        f"{left_label_input} 결산액": int(round(s_val)),
-        f"매칭 {right_label_input} 항목명": selected_match,
-        f"{right_label_input} 결산액": int(round(t_val)),
-        "차액": int(round(diff)),
-        "AI 추천 힌트": ai_hint,
-        "매칭유형": status_text
-    })
-
-res_df = pd.DataFrame(matched_rows)
-
-# ----------------------------------------------------
-# 4단계: 상단 자금 정합성 배너 & 컴팩트 KPI
-# ----------------------------------------------------
-total_items = len(res_df)
-match_items = len(res_df[res_df["상태"] == "✅ 일치"])
-error_items = len(res_df[res_df["상태"] == "❌ 오류"])
-unmatched_items = len(res_df[res_df["상태"] == "⚠️ 미매칭"])
-
-border_color = "#059669" if abs(grand_diff) < 1 else "#DC2626"
-diff_summary_text = "총계 완벽 일치 (0원)" if abs(grand_diff) < 1 else f"총계 차액: {grand_diff:+,.0f} 원"
-
-st.markdown(f"""
-<div class="kpi-card" style="margin-bottom: 16px; border-left: 5px solid {border_color};">
-    <div style="font-size: 13px; font-weight: 600; color: #64748B;">자금 결산 정합성 현황 (공식 총계 행 기준)</div>
-    <div style="font-size: 16px; font-weight: 700; color: #0F172A; margin-top: 4px;">
-        {left_label_input} 총계: <b style="color:#1E40AF;">{official_s_total:,.0f} 원</b> 
-        <span style="font-size:12px; color:#64748B; font-weight:normal;">(출처: {s_total_source_name})</span>
-        &nbsp;↔&nbsp; 
-        {right_label_input} 총계: <b style="color:#6D28D9;">{official_t_total:,.0f} 원</b> 
-        <span style="font-size:12px; color:#64748B; font-weight:normal;">(출처: {t_total_source_name})</span>
-        &nbsp;
-        <span style="color: {border_color}; font-size: 15px;">
-            [ {diff_summary_text} ]
-        </span>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-m1, m2, m3, m4 = st.columns(4)
-m1.markdown(f"""<div class="kpi-card"><div style="color: #64748B; font-size:11.5px; font-weight:600;">전체 검증 항목</div><div class="kpi-val" style="color: #0F172A;">{total_items}건</div></div>""", unsafe_allow_html=True)
-m2.markdown(f"""<div class="kpi-card" style="border-color: #A7F3D0; background-color: #F0FDF4;"><div style="color: #059669; font-size:11.5px; font-weight:600;">정상 일치</div><div class="kpi-val" style="color: #059669;">{match_items}건 <span style="font-size:12px;">({(match_items/total_items*100 if total_items else 0):.1f}%)</span></div></div>""", unsafe_allow_html=True)
-m3.markdown(f"""<div class="kpi-card" style="border-color: #FECACA; background-color: #FEF2F2;"><div style="color: #DC2626; font-size:11.5px; font-weight:600;">차액 오류</div><div class="kpi-val" style="color: #DC2626;">{error_items}건</div></div>""", unsafe_allow_html=True)
-m4.markdown(f"""<div class="kpi-card" style="border-color: #FDE68A; background-color: #FFFBEB;"><div style="color: #D97706; font-size:11.5px; font-weight:600;">미매칭 항목</div><div class="kpi-val" style="color: #D97706;">{unmatched_items}건</div></div>""", unsafe_allow_html=True)
-
-st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
-
-# ----------------------------------------------------
-# 5단계: 📑 엑셀형 인터랙티브 스마트 시트 (세로 길이 대폭 확장)
-# ----------------------------------------------------
-ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1.8, 1.2])
-
-with ctrl_col1:
-    filter_choice = st.radio(
-        "검증 필터",
-        ["전체 항목 보기", "❌ 차액 오류만", "⚠️ 미매칭만"],
-        horizontal=True
-    )
-
-with ctrl_col2:
-    search_keyword = st.text_input("🔍 계정명 빠른 검색", placeholder="예: 수업료, 예수금, 자산...")
-
-with ctrl_col3:
-    st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-    export_buffer = io.BytesIO()
-    with pd.ExcelWriter(export_buffer, engine='openpyxl') as writer:
-        res_df.to_excel(writer, index=False, sheet_name="검증결과리포트")
-    export_buffer.seek(0)
-    
-    st.download_button(
-        label="📥 결과 엑셀 다운로드",
-        data=export_buffer,
-        file_name=f"검증결과_{selected_project_name}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-        use_container_width=True
-    )
-
-display_df = res_df.copy()
-if filter_choice == "❌ 차액 오류만":
-    display_df = display_df[display_df["상태"] == "❌ 오류"]
-elif filter_choice == "⚠️ 미매칭만":
-    display_df = display_df[display_df["상태"] == "⚠️ 미매칭"]
-
-if search_keyword.strip():
-    kw = search_keyword.strip()
-    s_col_name = f"{left_label_input} 항목명"
-    t_col_name = f"매칭 {right_label_input} 항목명"
-    display_df = display_df[display_df[s_col_name].str.contains(kw) | display_df[t_col_name].str.contains(kw)]
-
-# 친절하고 직관적인 실무 안내 문구
-st.info(f"💡 **표 편집 안내:** 엑셀처럼 아래 표에서 **[매칭 {right_label_input} 항목명]** 칸을 더블클릭하면 원하는 계정을 바로 선택하여 변경할 수 있습니다. 변경 후 우측 하단의 **[💾 일괄 영구 저장]**을 누르면 안전하게 보존됩니다.")
-
-target_column_title = f"매칭 {right_label_input} 항목명"
-
-# ★ 핵심 개선: 표 높이를 480px -> 760px로 대폭 확장하여 한눈에 20개 행 이상 시원하게 표시
-edited_df = st.data_editor(
-    display_df,
-    use_container_width=True,
-    height=760,
-    hide_index=True,
-    key=f"editor_{curr_project_id}",
-    column_config={
-        "상태": st.column_config.TextColumn("검증 상태", width=85, disabled=True),
-        f"{left_label_input} 항목명": st.column_config.TextColumn(f"{left_label_input} 항목명 (기준)", width=210, disabled=True),
-        f"{left_label_input} 결산액": st.column_config.NumberColumn(
-            f"{left_label_input} 금액 (원)", 
-            format="%,d", 
-            width=135,
-            disabled=True
-        ),
-        target_column_title: st.column_config.SelectboxColumn(
-            f"매칭 {right_label_input} 항목명 (더블클릭)",
-            help="더블클릭하여 대조할 재단 계정을 변경할 수 있습니다.",
-            options=target_options,
-            required=True,
-            width=210
-        ),
-        f"{right_label_input} 결산액": st.column_config.NumberColumn(
-            f"{right_label_input} 금액 (원)", 
-            format="%,d", 
-            width=135,
-            disabled=True
-        ),
-        "차액": st.column_config.NumberColumn(
-            "차액 (원)", 
-            format="%,d", 
-            width=135,
-            disabled=True
-        ),
-        "AI 추천 힌트": st.column_config.TextColumn("AI 추천 힌트", width=180, disabled=True),
-        "매칭유형": st.column_config.TextColumn("유형", width=75, disabled=True)
-    }
-)
-
-save_col1, save_col2 = st.columns([3, 1])
-with save_col2:
-    if st.button("💾 표에서 변경한 매칭 일괄 영구 저장", type="primary", use_container_width=True):
-        changed_count = 0
-        batch_to_save = {}
-        for _, row in edited_df.iterrows():
-            s_name = row[f"{left_label_input} 항목명"]
-            t_name = row[target_column_title]
-            safe_key = f"match_override_{curr_project_id}_{re.sub(r'[^a-zA-Z0-9가-힣]', '_', s_name)}"
-            
-            if st.session_state.get(safe_key) != t_name:
-                st.session_state[safe_key] = t_name
-                batch_to_save[s_name] = t_name
-                changed_count += 1
-            elif s_name not in saved_history or saved_history[s_name] != t_name:
-                batch_to_save[s_name] = t_name
-                changed_count += 1
-                
-        if changed_count > 0:
-            save_batch_mappings(batch_to_save)
-            st.success(f"{changed_count}개 계정의 매칭 정보가 영구 저장되었습니다!")
+    with st.expander("📁 1단계: 대조 파일 업로드 및 대상 시트 선택 (상시 변경 가능)", expanded=True):
+        lbl_c1, lbl_c2 = st.columns(2)
+        with lbl_c1: left_label_input = st.text_input("기준 파일 라벨", value=workspace_files["left_label"], key=f"left_lbl_{curr_project_id}")
+        with lbl_c2: right_label_input = st.text_input("대조 파일 라벨", value=workspace_files["right_label"], key=f"right_lbl_{curr_project_id}")
+        if (left_label_input != workspace_files["left_label"]) or (right_label_input != workspace_files["right_label"]):
+            update_workspace_labels(curr_project_id, left_label_input, right_label_input)
             st.rerun()
+
+        f_col1, f_col2 = st.columns(2)
+        with f_col1:
+            st.markdown(f"**🏫 {left_label_input} 파일**")
+            new_s_file = st.file_uploader(f"{left_label_input} 등록 (.xlsx, .xls)", type=["xlsx", "xls"], key=f"s_up_{curr_project_id}")
+            if new_s_file is not None:
+                bytes_val = new_s_file.getvalue()
+                if source_blob != bytes_val:
+                    init_s = pd.ExcelFile(io.BytesIO(bytes_val)).sheet_names[0]
+                    update_workspace_file_blob(curr_project_id, "source", bytes_val, default_sheet=init_s)
+                    st.rerun()
+            if source_blob is not None:
+                xl_s = pd.ExcelFile(io.BytesIO(source_blob))
+                cur_s_sheet = workspace_files.get("source_sheet_name")
+                s_idx = xl_s.sheet_names.index(cur_s_sheet) if cur_s_sheet in xl_s.sheet_names else 0
+                chosen_s = st.selectbox(f"📑 [{left_label_input}] 시트 선택", xl_s.sheet_names, index=s_idx, key=f"s_sheet_{curr_project_id}")
+                if chosen_s != cur_s_sheet:
+                    update_workspace_sheet_choice(curr_project_id, "source", chosen_s)
+                    st.rerun()
+                source_df = pd.read_excel(io.BytesIO(source_blob), sheet_name=chosen_s)
+                st.caption(f"✓ '{chosen_s}' 로드됨 ({len(source_df)}행)")
+
+        with f_col2:
+            st.markdown(f"**🏛️ {right_label_input} 파일**")
+            new_t_file = st.file_uploader(f"{right_label_input} 등록 (.xlsx, .xls)", type=["xlsx", "xls"], key=f"t_up_{curr_project_id}")
+            if new_t_file is not None:
+                bytes_val_t = new_t_file.getvalue()
+                if target_blob != bytes_val_t:
+                    init_t = pd.ExcelFile(io.BytesIO(bytes_val_t)).sheet_names[0]
+                    update_workspace_file_blob(curr_project_id, "target", bytes_val_t, default_sheet=init_t)
+                    st.rerun()
+            if target_blob is not None:
+                xl_t = pd.ExcelFile(io.BytesIO(target_blob))
+                cur_t_sheet = workspace_files.get("target_sheet_name")
+                t_idx = xl_t.sheet_names.index(cur_t_sheet) if cur_t_sheet in xl_t.sheet_names else 0
+                chosen_t = st.selectbox(f"📑 [{right_label_input}] 시트 선택", xl_t.sheet_names, index=t_idx, key=f"t_sheet_{curr_project_id}")
+                if chosen_t != cur_t_sheet:
+                    update_workspace_sheet_choice(curr_project_id, "target", chosen_t)
+                    st.rerun()
+                target_df = pd.read_excel(io.BytesIO(target_blob), sheet_name=chosen_t)
+                st.caption(f"✓ '{chosen_t}' 로드됨 ({len(target_df)}행)")
+
+    if source_df is None or target_df is None:
+        st.info("💡 1단계 카드에서 두 엑셀 파일을 업로드하고 [대상 시트]를 각각 선택해 주세요.")
+        st.stop()
+
+    # 2단계: 대조 열 및 총계 행 설정
+    source_cols = list(source_df.columns)
+    target_cols = list(target_df.columns)
+    def_s_name = saved_settings.get("s_name_col", source_cols[0] if source_cols else None)
+    def_t_name = saved_settings.get("t_name_col", target_cols[0] if target_cols else None)
+    def_s_amt = saved_settings.get("s_amt", source_cols[min(2, len(source_cols)-1)] if source_cols else None)
+    def_t_amt = saved_settings.get("t_amt", target_cols[min(2, len(target_cols)-1)] if target_cols else None)
+    def_s_tot = saved_settings.get("forced_s_total_row", "(자동 감지)")
+    def_t_tot = saved_settings.get("forced_t_total_row", "(자동 감지)")
+
+    with st.expander("⚙️ 2단계: 대조 열 및 양측 총계 행 설정 (자동 저장됨)", expanded=True):
+        c1, c2 = st.columns(2)
+        with c1: s_name_col = st.selectbox(f"{left_label_input} 항목명 열", source_cols, index=source_cols.index(def_s_name) if def_s_name in source_cols else 0)
+        with c2: t_name_col = st.selectbox(f"{right_label_input} 항목명 열", target_cols, index=target_cols.index(def_t_name) if def_t_name in target_cols else 0)
+        a1, a2 = st.columns(2)
+        with a1: s_amt = st.selectbox(f"금액 열 ({left_label_input})", source_cols, index=source_cols.index(def_s_amt) if def_s_amt in source_cols else min(2, len(source_cols)-1))
+        with a2: t_amt = st.selectbox(f"금액 열 ({right_label_input})", target_cols, index=target_cols.index(def_t_amt) if def_t_amt in target_cols else min(2, len(target_cols)-1))
+
+        tc1, tc2 = st.columns(2)
+        s_cands = get_all_row_candidates(source_df, s_name_col)
+        with tc1:
+            forced_s_total_row = st.selectbox(f"🏫 [{left_label_input}] 총계 행 선택", s_cands, index=s_cands.index(def_s_tot) if def_s_tot in s_cands else 0, key=f"f_s_tot_{curr_project_id}")
+            if forced_s_total_row != "(자동 감지)":
+                r_m = source_df[source_df[s_name_col].astype(str).str.strip() == forced_s_total_row]
+                if not r_m.empty: st.caption(f"확인된 금액: **{clean_number(r_m.iloc[-1][s_amt]):,.0f} 원**")
+        t_cands = get_all_row_candidates(target_df, t_name_col)
+        with tc2:
+            forced_t_total_row = st.selectbox(f"🏛️ [{right_label_input}] 총계 행 선택", t_cands, index=t_cands.index(def_t_tot) if def_t_tot in t_cands else 0, key=f"f_t_tot_{curr_project_id}")
+            if forced_t_total_row != "(자동 감지)":
+                r_mt = target_df[target_df[t_name_col].astype(str).str.strip() == forced_t_total_row]
+                if not r_mt.empty: st.caption(f"확인된 금액: **{clean_number(r_mt.iloc[-1][t_amt]):,.0f} 원**")
+
+        current_settings = {"s_name_col": s_name_col, "t_name_col": t_name_col, "s_amt": s_amt, "t_amt": t_amt, "forced_s_total_row": forced_s_total_row, "forced_t_total_row": forced_t_total_row}
+        if current_settings != saved_settings: save_workspace_settings(curr_project_id, current_settings)
+
+    # 3단계: 총계 및 매칭 연산
+    s_df_clean = source_df.dropna(subset=[s_name_col]).copy()
+    t_df_clean = target_df.dropna(subset=[t_name_col]).copy()
+    s_df_clean[s_name_col] = s_df_clean[s_name_col].astype(str).str.strip()
+    t_df_clean[t_name_col] = t_df_clean[t_name_col].astype(str).str.strip()
+    s_df_clean[s_amt] = s_df_clean[s_amt].apply(clean_number)
+    t_df_clean[t_amt] = t_df_clean[t_amt].apply(clean_number)
+
+    official_t_total, t_src_name = extract_smart_grand_total(t_df_clean, t_name_col, t_amt, forced_row=forced_t_total_row)
+    t_type = "수입" if "수입" in t_src_name else ("지출" if "지출" in t_src_name else "전체")
+    official_s_total, s_src_name = extract_smart_grand_total(s_df_clean, s_name_col, s_amt, target_total_type=t_type, forced_row=forced_s_total_row)
+    grand_diff = official_s_total - official_t_total
+
+    target_sum_lookup = dict(t_df_clean.groupby(t_name_col)[t_amt].sum())
+    raw_target_list = sorted([str(x).strip() for x in t_df_clean[t_name_col].unique() if str(x).strip()])
+    target_clean_dict = {r: clean_account_name(r) for r in raw_target_list}
+    target_options = ["(매칭 제외)"] + raw_target_list
+    saved_history = get_saved_mappings()
+    unique_s_items = sorted([str(x).strip() for x in s_df_clean[s_name_col].unique() if str(x).strip() and not is_aggregate_account(str(x))])
+
+    matched_rows = []
+    for s_name in unique_s_items:
+        s_key = f"match_override_{curr_project_id}_{re.sub(r'[^a-zA-Z0-9가-힣]', '_', s_name)}"
+        if s_key in st.session_state:
+            sel_match, st_text = st.session_state[s_key], "✏️ 수동"
+        elif s_name in saved_history and saved_history[s_name] in target_options:
+            sel_match, st_text = saved_history[s_name], "💾 저장됨"
         else:
-            st.info("변경된 항목이 없습니다.")
+            sel_match, st_text = find_smart_match(s_name, target_options, target_clean_dict, saved_history)
+
+        s_val = s_df_clean[s_df_clean[s_name_col] == s_name][s_amt].sum()
+        t_val = target_sum_lookup.get(sel_match, 0.0) if sel_match and sel_match != "(매칭 제외)" else 0.0
+        diff = s_val - t_val
+        val_status = "⚠️ 미매칭" if (not sel_match or sel_match == "(매칭 제외)") else ("❌ 오류" if abs(diff) > 0.01 else "✅ 일치")
+        
+        matched_rows.append({
+            "상태": val_status,
+            f"{left_label_input} 항목명": s_name,
+            f"{left_label_input} 결산액": int(round(s_val)),
+            f"매칭 {right_label_input} 항목명": sel_match,
+            f"{right_label_input} 결산액": int(round(t_val)),
+            "차액": int(round(diff)),
+            "매칭유형": st_text
+        })
+    res_df = pd.DataFrame(matched_rows)
+
+    # 상단 요약 배너
+    border_c = "#059669" if abs(grand_diff) < 1 else "#DC2626"
+    diff_txt = "총계 완벽 일치 (0원)" if abs(grand_diff) < 1 else f"총계 차액: {grand_diff:+,.0f} 원"
+    st.markdown(f"""
+    <div class="kpi-card" style="margin-bottom: 16px; border-left: 5px solid {border_c};">
+        <div style="font-size: 13px; font-weight: 600; color: #64748B;">자금 결산 정합성 현황 (공식 총계 행 기준)</div>
+        <div style="font-size: 16px; font-weight: 700; color: #0F172A; margin-top: 4px;">
+            {left_label_input} 총계: <b style="color:#1E40AF;">{official_s_total:,.0f} 원</b> ↔ 
+            {right_label_input} 총계: <b style="color:#6D28D9;">{official_t_total:,.0f} 원</b> 
+            &nbsp;<span style="color:{border_c}; font-size:15px;">[ {diff_txt} ]</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 스마트 시트 표 (height=760px)
+    t_col_title = f"매칭 {right_label_input} 항목명"
+    st.info("💡 **표 편집 안내:** 표 안에서 항목을 더블클릭하여 변경 후 아래 [💾 영구 저장]을 눌러주세요.")
+    edited_df = st.data_editor(
+        res_df,
+        use_container_width=True,
+        height=760,
+        hide_index=True,
+        key=f"editor_{curr_project_id}",
+        column_config={
+            "상태": st.column_config.TextColumn("검증 상태", width=85, disabled=True),
+            f"{left_label_input} 항목명": st.column_config.TextColumn(f"{left_label_input} 항목명 (기준)", width=210, disabled=True),
+            f"{left_label_input} 결산액": st.column_config.NumberColumn(f"{left_label_input} 금액 (원)", format="%,d", width=135, disabled=True),
+            t_col_title: st.column_config.SelectboxColumn(f"매칭 {right_label_input} 항목명 (더블클릭)", options=target_options, required=True, width=210),
+            f"{right_label_input} 결산액": st.column_config.NumberColumn(f"{right_label_input} 금액 (원)", format="%,d", width=135, disabled=True),
+            "차액": st.column_config.NumberColumn("차액 (원)", format="%,d", width=135, disabled=True),
+            "매칭유형": st.column_config.TextColumn("유형", width=75, disabled=True)
+        }
+    )
+    if st.button("💾 표에서 변경한 매칭 일괄 영구 저장", type="primary", use_container_width=True):
+        b_save = {}
+        for _, row in edited_df.iterrows():
+            sn = row[f"{left_label_input} 항목명"]
+            tn = row[t_col_title]
+            b_save[sn] = tn
+        save_batch_mappings(b_save)
+        st.success("저장 완료!")
+        st.rerun()
+
+# ==========================================
+# PAGE 3: 🎗️ 기부금 관리 시스템
+# ==========================================
+elif st.session_state.current_page == "DONATION":
+    st.markdown('<div class="main-app-title">🎗️ 기부금 관리 시스템</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-app-caption">대학 및 법인 기부금 수입·지출 등록, 국세청 표준 법정 서식 및 발급명세서를 자동 생성합니다.</div>', unsafe_allow_html=True)
+
+    # 1. 회계 모드 선택 (대학 회계 vs 법인 회계 완전 분리)
+    ent_c1, ent_c2 = st.columns([2, 3])
+    with ent_c1:
+        entity_choice = st.radio(
+            "회계 분리 모드",
+            ["🏫 대학 회계", "🏛️ 법인 회계"],
+            horizontal=True
+        )
+    current_entity = "UNIVERSITY" if "대학" in entity_choice else "FOUNDATION"
+
+    st.markdown("<hr style='margin:10px 0 16px 0; border-color:#E2E8F0;'>", unsafe_allow_html=True)
+
+    # 2. 용도별 합계 및 법정부담금 실시간 대시보드
+    conn = get_db_connection()
+    receipts_df = pd.read_sql_query("SELECT * FROM donation_receipts WHERE entity_type = ?", conn, params=(current_entity,))
+    expenses_df = pd.read_sql_query("SELECT * FROM donation_expenses WHERE entity_type = ?", conn, params=(current_entity,))
+    conn.close()
+
+    total_income = receipts_df['amount'].sum() if not receipts_df.empty else 0.0
+    total_expense = expenses_df['amount'].sum() if not expenses_df.empty else 0.0
+    balance = total_income - total_expense
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.markdown(f"""<div class="kpi-card"><div style="color:#64748B; font-size:12px; font-weight:600;">총 기부금 수입</div><div class="kpi-val" style="color:#2563EB;">{total_income:,.0f} 원</div></div>""", unsafe_allow_html=True)
+    k2.markdown(f"""<div class="kpi-card"><div style="color:#64748B; font-size:12px; font-weight:600;">총 기부금 지출</div><div class="kpi-val" style="color:#DC2626;">{total_expense:,.0f} 원</div></div>""", unsafe_allow_html=True)
+    k3.markdown(f"""<div class="kpi-card"><div style="color:#64748B; font-size:12px; font-weight:600;">현재 집행 잔액</div><div class="kpi-val" style="color:#059669;">{balance:,.0f} 원</div></div>""", unsafe_allow_html=True)
+    k4.markdown(f"""<div class="kpi-card"><div style="color:#64748B; font-size:12px; font-weight:600;">영수증 발급 누계</div><div class="kpi-val" style="color:#0F172A;">{len(receipts_df)} 건</div></div>""", unsafe_allow_html=True)
+
+    # 법인 모드 전용 법정부담금 전출 정산 현황 배너
+    if current_entity == "FOUNDATION":
+        stat_inc = receipts_df[receipts_df['is_statutory_transfer'] == 1]['amount'].sum() if not receipts_df.empty else 0.0
+        stat_exp = expenses_df[expenses_df['is_statutory_transfer'] == 1]['amount'].sum() if not expenses_df.empty else 0.0
+        st.markdown(f"""
+        <div class="kpi-card" style="margin-top:14px; border-left:5px solid #7C3AED; background-color:#FAF5FF;">
+            <div style="font-size:13px; font-weight:700; color:#6B21A8;">🏛️ [법인 전용] 법정부담금 전출 특화 관리 현황</div>
+            <div style="font-size:14.5px; color:#1E293B; margin-top:4px;">
+                법정부담금 전출용 수입: <b>{stat_inc:,.0f} 원</b> ↔ 학교 전출 지출: <b>{stat_exp:,.0f} 원</b> 
+                (정산 잔액: <b>{stat_inc - stat_exp:,.0f} 원</b>)
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
+
+    # 3. 탭 구성: 기부금 수입 등록 | 지출 등록 | 용도별 정산표 | 발급명세서 & 영수증 출력
+    tab_in, tab_out, tab_sum, tab_print = st.tabs([
+        "📥 기부금 수입 등록 및 영수증 채번", 
+        "📤 기부금 지출 내역 등록", 
+        "📊 용도별 집행 정산표", 
+        "📑 국세청 서식 및 영수증 엑셀 출력"
+    ])
+
+    # [TAB 1] 기부금 수입 등록
+    with tab_in:
+        with st.form(key="form_donation_income"):
+            st.markdown("##### 1. 기부자 인적사항 및 회계 분류")
+            f1, f2, f3 = st.columns(3)
+            with f1:
+                d_date = st.date_input("기부일자", datetime.now())
+                budget_subj = st.selectbox("예산과목", ["일반기부금", "지정기부금", "현물기부금"])
+            with f2:
+                purpose_input = st.text_input("사용 용도 (직접 입력)", placeholder="예: 장학기금, 학과발전기금, 건물신축")
+                d_main_type = st.selectbox("기부자 구분 (상위)", ["개인", "기업체", "단체및기관"])
+            with f3:
+                sub_opts = ["교직원", "일반인"] if d_main_type == "개인" else ([d_main_type])
+                d_sub_type = st.selectbox("기부자 구분 (하위)", sub_opts)
+                donor_name = st.text_input("기부자 성명 (또는 법인/단체명)")
+
+            st.markdown("##### 2. 식별번호 및 기부 명세")
+            f4, f5, f6 = st.columns(3)
+            with f4:
+                raw_id_no = st.text_input("주민등록번호 / 사업자번호", placeholder="예: 900101-1234567 또는 사업자번호", type="password", help="보안을 위해 비밀번호 형태로 마스킹 처리됩니다.")
+            with f5:
+                d_type = st.selectbox("기부 내용 구분", ["금전", "현물"])
+                d_code = st.text_input("구분 코드 (법정 서식)", value="10")
+            with f6:
+                d_amt = st.number_input("기부 금액 (원)", min_value=0, step=10000, format="%d")
+
+            st.markdown("##### 3. 영수증 발급 정보")
+            f7, f8, f9 = st.columns(3)
+            auto_rec_no = generate_receipt_no(current_entity)
+            with f7:
+                rec_no = st.text_input("발급번호 (YY-NN 자동)", value=auto_rec_no)
+            with f8:
+                rec_date = st.date_input("발급일자", datetime.now())
+            with f9:
+                is_stat_chk = 0
+                if current_entity == "FOUNDATION":
+                    is_stat = st.checkbox("📌 법정부담금 전출용 기부금 여부")
+                    is_stat_chk = 1 if is_stat else 0
+
+            submit_income = st.form_submit_button("💾 기부금 수입 등록 및 영수증 확정", type="primary", use_container_width=True)
+
+            if submit_income:
+                if donor_name.strip() and d_amt > 0:
+                    masked_id = mask_id_number(raw_id_no)
+                    cipher_id = simple_encrypt(raw_id_no)
+                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        INSERT INTO donation_receipts (
+                            entity_type, donation_date, budget_subject, purpose,
+                            donor_main_type, donor_sub_type, donor_name,
+                            id_number_masked, id_number_cipher, donation_type,
+                            code, amount, receipt_no, receipt_date, is_statutory_transfer, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        current_entity, str(d_date), budget_subj, purpose_input.strip() or "일반",
+                        d_main_type, d_sub_type, donor_name.strip(),
+                        masked_id, cipher_id, d_type,
+                        d_code.strip(), float(d_amt), rec_no.strip(), str(rec_date), is_stat_chk, now_str
+                    ))
+                    conn.commit()
+                    conn.close()
+                    st.success(f"[{donor_name}] 님의 기부금 ({d_amt:,.0f}원 / 발급번호: {rec_no}) 등록이 완료되었습니다!")
+                    st.rerun()
+                else:
+                    st.warning("기부자 성명과 기부 금액을 올바르게 입력해 주세요.")
+
+        # 최근 등록 목록 표
+        st.markdown("##### 📋 최근 기부금 수입 등록 내역")
+        if not receipts_df.empty:
+            display_rec = receipts_df[[
+                'receipt_no', 'donation_date', 'donor_name', 'id_number_masked', 
+                'budget_subject', 'purpose', 'amount', 'donation_type', 'receipt_date'
+            ]].copy()
+            display_rec.columns = ['발급번호', '기부일자', '기부자명', '식별번호(마스킹)', '예산과목', '사용용도', '기부금액(원)', '구분', '발급일자']
+            st.dataframe(display_rec, use_container_width=True, height=280)
+        else:
+            st.caption("등록된 기부금 내역이 없습니다.")
+
+    # [TAB 2] 기부금 지출 내역 등록
+    with tab_out:
+        with st.form(key="form_donation_expense"):
+            st.markdown("##### 기부금 지출(수혜) 내역 등록")
+            e1, e2 = st.columns(2)
+            with e1:
+                e_date = st.date_input("지출일자", datetime.now())
+                e_beneficiary = st.text_input("수혜자 (학생 성명, 학과, 기관 등)", placeholder="예: 기계공학과 홍길동 장학생")
+                e_purpose = st.text_input("대응 사용 용도", placeholder="수입 당시 용도와 동일하게 입력 (예: 장학기금)")
+            with e2:
+                e_content = st.text_area("수혜 내용", placeholder="예: 2026학년도 1학기 발전기금 장학금 지급", height=90)
+                e_amt = st.number_input("지출 금액 (원)", min_value=0, step=10000, format="%d")
+                is_stat_exp = 0
+                if current_entity == "FOUNDATION":
+                    is_s_e = st.checkbox("📌 법정부담금 전출 지출 여부")
+                    is_stat_exp = 1 if is_s_e else 0
+
+            submit_expense = st.form_submit_button("💾 기부금 지출 등록", type="primary", use_container_width=True)
+            if submit_expense:
+                if e_beneficiary.strip() and e_amt > 0:
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    cursor.execute("""
+                        INSERT INTO donation_expenses (
+                            entity_type, expense_date, beneficiary, content, purpose, amount, is_statutory_transfer, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (current_entity, str(e_date), e_beneficiary.strip(), e_content.strip(), e_purpose.strip() or "일반", float(e_amt), is_stat_exp, now_str))
+                    conn.commit()
+                    conn.close()
+                    st.success("지출 내역이 성공적으로 등록되었습니다.")
+                    st.rerun()
+                else:
+                    st.warning("수혜자와 지출 금액을 입력해 주세요.")
+
+        st.markdown("##### 📋 최근 기부금 지출 내역")
+        if not expenses_df.empty:
+            display_exp = expenses_df[['expense_date', 'beneficiary', 'content', 'purpose', 'amount']].copy()
+            display_exp.columns = ['지출일자', '수혜자', '수혜 내용', '사용용도', '지출금액(원)']
+            st.dataframe(display_exp, use_container_width=True, height=240)
+        else:
+            st.caption("등록된 지출 내역이 없습니다.")
+
+    # [TAB 3] 용도별 집행 정산표
+    with tab_sum:
+        st.markdown("##### 📊 사용 용도별 수입·지출 및 집행 잔액 현황")
+        # 용도별 집계 계산
+        inc_by_p = receipts_df.groupby('purpose')['amount'].sum().reset_index() if not receipts_df.empty else pd.DataFrame(columns=['purpose', 'amount'])
+        exp_by_p = expenses_df.groupby('purpose')['amount'].sum().reset_index() if not expenses_df.empty else pd.DataFrame(columns=['purpose', 'amount'])
+        
+        merged_p = pd.merge(inc_by_p, exp_by_p, on='purpose', how='outer', suffixes=('_수입', '_지출')).fillna(0)
+        merged_p['집행잔액'] = merged_p['amount_수입'] - merged_p['amount_지출']
+        merged_p.columns = ['사용 용도', '수입 누계 (원)', '지출 누계 (원)', '집행 잔액 (원)']
+        
+        st.dataframe(merged_p.style.format({
+            '수입 누계 (원)': '{:,.0f}',
+            '지출 누계 (원)': '{:,.0f}',
+            '집행 잔액 (원)': '{:,.0f}'
+        }), use_container_width=True)
+
+    # [TAB 4] 국세청 표준 서식 및 기부자별 발급명세서 엑셀 출력 (2번 방식 반영)
+    with tab_print:
+        st.markdown("##### 📑 서식 출력 및 다운로드 (로컬 PC 직인 날인 가능)")
+        st.caption("웹 서버에 직인 이미지를 올리지 않고, 국세청 법정 양식 엑셀을 내려받아 로컬 PC에서 직인을 넣거나 출력 후 실물 도장을 날인할 수 있습니다.")
+
+        down_c1, down_c2 = st.columns(2)
+        
+        # 1) 국세청 기부자별 발급명세서 다운로드
+        with down_c1:
+            st.markdown("###### 1. 기부자별 발급명세서 (연말정산/세무서 제출용)")
+            if not receipts_df.empty:
+                # 기부자별 집계
+                summary_donor = receipts_df.groupby(['donor_name', 'id_number_masked', 'code']).agg(
+                    건수=('amount', 'count'),
+                    총금액=('amount', 'sum')
+                ).reset_index()
+                summary_donor.columns = ['기부자 성명(법인명)', '주민등록번호(사업자번호)', '기부유형코드', '발급건수', '기부금액 합계']
+
+                buf_donor = io.BytesIO()
+                with pd.ExcelWriter(buf_donor, engine='openpyxl') as writer:
+                    summary_donor.to_excel(writer, index=False, sheet_name="기부자별발급명세서")
+                buf_donor.seek(0)
+
+                st.download_button(
+                    label="📥 기부자별 발급명세서 (.xlsx) 다운로드",
+                    data=buf_donor,
+                    file_name=f"기부자별발급명세서_{current_entity}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    type="primary"
+                )
+            else:
+                st.info("데이터가 없어 다운로드할 수 없습니다.")
+
+        # 2) 소득세법 시행규칙 별지 제45호의2 서식 (기부금영수증 개별 엑셀 서식)
+        with down_c2:
+            st.markdown("###### 2. 국세청 법정 기부금영수증 표준 서식 (개별/전체)")
+            if not receipts_df.empty:
+                # 표준 법정 서식 시트 생성
+                buf_receipt = io.BytesIO()
+                with pd.ExcelWriter(buf_receipt, engine='openpyxl') as writer:
+                    # 개별 영수증들을 서식 규격에 맞게 엑셀 행으로 구성
+                    legal_form_df = receipts_df[[
+                        'receipt_no', 'donor_name', 'id_number_masked', 'budget_subject',
+                        'donation_date', 'donation_type', 'code', 'amount', 'receipt_date'
+                    ]].copy()
+                    legal_form_df.columns = [
+                        '발급번호(일련번호)', '기부자성명', '주민(사업자)등록번호', '기부금유형(법정/지정)',
+                        '기부연월일', '내용(금전/현물)', '코드(10)', '기부금액(원)', '영수증발급일'
+                    ]
+                    legal_form_df['발급기관 날인란'] = "(직인 생략 - 인쇄 후 날인)"
+                    legal_form_df.to_excel(writer, index=False, sheet_name="기부금영수증_법정양식")
+
+                buf_receipt.seek(0)
+                st.download_button(
+                    label="📥 국세청 기부금영수증 법정서식 (.xlsx) 다운로드",
+                    data=buf_receipt,
+                    file_name=f"기부금영수증_소득세법서식_{current_entity}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    type="primary"
+                )
+            else:
+                st.info("데이터가 없어 다운로드할 수 없습니다.")
