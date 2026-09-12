@@ -51,6 +51,16 @@ st.markdown("""
         border: 1px solid #CBD5E1;
         background-color: #FFFFFF;
     }
+
+    /* 사이드바 프로젝트 리스트 스타일링 */
+    div[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] > div.project-item-container {
+        border-radius: 8px;
+        padding: 4px;
+        transition: background-color 0.2s;
+    }
+    div[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] > div.project-item-container:hover {
+        background-color: #F1F5F9;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -134,7 +144,6 @@ def create_project(name):
     conn.close()
     return success
 
-# ★ 프로젝트 이름 수정 함수 추가
 def rename_project(project_id, new_name):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -379,75 +388,92 @@ def extract_smart_grand_total(df, name_col, amt_col, target_total_type="수입",
     return float(pure_sum), "세부계정 순합계"
 
 # ==========================================
-# 5. 사이드바: 프로젝트 관리 & 이름 수정 기능
+# 5. 사이드바: 나열형 프로젝트 리스트 & 인라인 아이콘 팝오버 수정
 # ==========================================
 projects_df = get_projects()
 
 with st.sidebar:
-    st.header("📂 프로젝트 관리")
+    st.markdown("#### 📂 프로젝트 목록")
     
-    # 새 프로젝트 등록
-    with st.expander("➕ 새 프로젝트 생성", expanded=False):
-        new_proj_name = st.text_input("새 프로젝트 이름", placeholder="예: 2025 본결산 (등록금)")
-        if st.button("프로젝트 등록", use_container_width=True, type="primary"):
+    # 새 프로젝트 생성 (컴팩트 입력창)
+    with st.expander("➕ 새 프로젝트 추가", expanded=False):
+        new_proj_name = st.text_input("새 프로젝트명", placeholder="예: 2025 본결산", key="new_proj_input_side")
+        if st.button("추가", use_container_width=True, type="primary"):
             if new_proj_name.strip():
                 if create_project(new_proj_name.strip()):
                     st.query_params["project"] = new_proj_name.strip()
-                    st.success("프로젝트가 생성되었습니다!")
+                    st.success("추가되었습니다!")
                     st.rerun()
                 else:
-                    st.error("이미 존재하는 이름입니다.")
+                    st.error("이미 존재하는 프로젝트입니다.")
             else:
                 st.warning("이름을 입력해 주세요.")
                 
+    st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
+    
     if not projects_df.empty:
         project_names = projects_df['name'].tolist()
         
+        # 현재 URL 또는 기본 프로젝트 설정
         url_proj = st.query_params.get("project", None)
-        default_idx = project_names.index(url_proj) if url_proj in project_names else 0
-        
-        selected_project_name = st.selectbox("📋 작업 대상 프로젝트", project_names, index=default_idx)
-        st.query_params["project"] = selected_project_name
-        
-        current_project = projects_df[projects_df['name'] == selected_project_name].iloc[0]
-        curr_project_id = int(current_project['id'])
-        st.caption(f"생성일시: {current_project['created_at']}")
-        
-        # ★ 프로젝트 이름 수정 기능 (새로 추가됨)
-        with st.expander("✏️ 프로젝트 이름 수정", expanded=False):
-            rename_input = st.text_input("변경할 프로젝트 이름", value=selected_project_name, key=f"rename_input_{curr_project_id}")
-            if st.button("이름 변경 저장", use_container_width=True, type="primary"):
-                clean_new_name = rename_input.strip()
-                if clean_new_name and clean_new_name != selected_project_name:
-                    if rename_project(curr_project_id, clean_new_name):
-                        st.query_params["project"] = clean_new_name
-                        st.success("프로젝트 이름이 성공적으로 변경되었습니다!")
-                        st.rerun()
-                    else:
-                        st.error("이미 존재하는 다른 프로젝트 이름입니다.")
-                elif clean_new_name == selected_project_name:
-                    st.info("현재 이름과 동일합니다.")
-                else:
-                    st.warning("이름을 입력해 주세요.")
+        if url_proj not in project_names:
+            url_proj = project_names[0]
+            st.query_params["project"] = url_proj
+            
+        selected_project_name = url_proj
+        selected_row = projects_df[projects_df['name'] == selected_project_name].iloc[0]
+        curr_project_id = int(selected_row['id'])
 
-        st.divider()
-        if st.button("🗑️ 선택된 프로젝트 삭제", type="secondary", use_container_width=True):
-            delete_project(curr_project_id)
-            if "project" in st.query_params:
-                del st.query_params["project"]
-            st.warning("프로젝트가 삭제되었습니다.")
-            st.rerun()
+        # ★ 프로젝트 나열 렌더링 (드롭다운 대신 직관적인 리스트 + 아이콘 액션)
+        for _, p_row in projects_df.iterrows():
+            p_id = int(p_row['id'])
+            p_name = p_row['name']
+            is_active = (p_name == selected_project_name)
+            
+            p_col1, p_col2 = st.columns([4, 1])
+            
+            with p_col1:
+                # 활성 프로젝트는 Primary 버튼, 비활성은 Secondary
+                btn_type = "primary" if is_active else "secondary"
+                prefix = "✓ " if is_active else "• "
+                if st.button(f"{prefix}{p_name}", key=f"sel_proj_{p_id}", type=btn_type, use_container_width=True):
+                    st.query_params["project"] = p_name
+                    st.rerun()
+                    
+            with p_col2:
+                # 마우스 클릭 시 가볍게 열리는 인라인 수정/삭제 팝오버
+                with st.popover("✏️", help="프로젝트명 수정 및 삭제"):
+                    st.markdown(f"**[{p_name}] 관리**")
+                    new_pname = st.text_input("새 이름", value=p_name, key=f"inline_rename_{p_id}")
+                    if st.button("이름 저장", key=f"btn_save_rename_{p_id}", use_container_width=True):
+                        clean_name = new_pname.strip()
+                        if clean_name and clean_name != p_name:
+                            if rename_project(p_id, clean_name):
+                                if is_active:
+                                    st.query_params["project"] = clean_name
+                                st.success("변경 완료!")
+                                st.rerun()
+                            else:
+                                st.error("중복된 이름입니다.")
+                    
+                    st.markdown("<hr style='margin: 8px 0;'>", unsafe_allow_html=True)
+                    if st.button("🗑️ 프로젝트 삭제", key=f"btn_del_{p_id}", type="secondary", use_container_width=True):
+                        delete_project(p_id)
+                        if is_active and "project" in st.query_params:
+                            del st.query_params["project"]
+                        st.warning("삭제되었습니다.")
+                        st.rerun()
     else:
         selected_project_name = None
         curr_project_id = None
-        st.info("새 프로젝트를 먼저 등록해 주세요.")
+        st.info("새 프로젝트를 먼저 추가해 주세요.")
 
 # ==========================================
 # 6. 메인 화면 로직
 # ==========================================
 if not selected_project_name:
     st.markdown('<div class="main-app-title">📊 데이터 스마트 검증기</div>', unsafe_allow_html=True)
-    st.info("👈 왼쪽 사이드바를 열어 프로젝트를 생성하거나 선택해 주세요.")
+    st.info("👈 왼쪽 사이드바에서 새 프로젝트를 추가해 주세요.")
     st.stop()
 
 workspace_state = get_workspace(curr_project_id)
