@@ -3,13 +3,14 @@ import pandas as pd
 import sqlite3
 import io
 import difflib
+import json
 from datetime import datetime
 
 # ==========================================
-# 1. 페이지 기본 설정 및 스타일
+# 1. 페이지 기본 설정
 # ==========================================
 st.set_page_config(
-    page_title="대학-사학진흥재단 결산서 스마트 검증기",
+    page_title="데이터 스마트 검증기",
     page_icon="📊",
     layout="wide"
 )
@@ -26,7 +27,7 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # 프로젝트 관리 테이블
+    # 1) 프로젝트 테이블
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,14 +36,27 @@ def init_db():
         )
     """)
     
-    # 계정과목 매칭 규칙 영구 저장 테이블 (과목명 기준)
+    # 2) 계정 매칭 학습 규칙 테이블 (누적 기억용)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS account_mappings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            school_name TEXT NOT NULL,
-            foundation_name TEXT NOT NULL,
+            source_name TEXT NOT NULL,
+            target_name TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            UNIQUE(school_name, foundation_name)
+            UNIQUE(source_name, target_name)
+        )
+    """)
+    
+    # 3) 프로젝트별 작업 상태 영구 저장 테이블 (새로고침 방지용)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS project_workspaces (
+            project_id INTEGER PRIMARY KEY,
+            left_label TEXT,
+            right_label TEXT,
+            source_data_json TEXT,
+            target_data_json TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         )
     """)
     conn.commit()
@@ -50,7 +64,7 @@ def init_db():
 
 init_db()
 
-# DB 조작 함수들
+# DB 데이터 조작 함수들
 def get_projects():
     conn = get_db_connection()
     df = pd.read_sql_query("SELECT * FROM projects ORDER BY id DESC", conn)
@@ -63,6 +77,12 @@ def create_project(name):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         cursor.execute("INSERT INTO projects (name, created_at) VALUES (?, ?)", (name, now))
+        new_id = cursor.lastrowid
+        # 기본 워크스페이스 레코드 생성
+        cursor.execute("""
+            INSERT INTO project_workspaces (project_id, left_label, right_label, source_data_json, target_data_json, updated_at)
+            VALUES (?, '기준 데이터', '대조 데이터', NULL, NULL, ?)
+        """, (new_id, now))
         conn.commit()
         success = True
     except sqlite3.IntegrityError:
@@ -77,27 +97,73 @@ def delete_project(project_id):
     conn.commit()
     conn.close()
 
+def get_workspace(project_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT left_label, right_label, source_data_json, target_data_json FROM project_workspaces WHERE project_id = ?", (project_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {
+            "left_label": row[0] or "기준 데이터",
+            "right_label": row[1] or "대조 데이터",
+            "source_data": pd.read_json(io.StringIO(row[2])) if row[2] else None,
+            "target_data": pd.read_json(io.StringIO(row[3])) if row[3] else None
+        }
+    return {"left_label": "기준 데이터", "right_label": "대조 데이터", "source_data": None, "target_data": None}
+
+def update_workspace(project_id, left_label, right_label, source_df, target_df):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    s_json = source_df.to_json(orient='records', force_ascii=False) if source_df is not None else None
+    t_json = target_df.to_json(orient='records', force_ascii=False) if target_df is not None else None
+    
+    cursor.execute("""
+        INSERT INTO project_workspaces (project_id, left_label, right_label, source_data_json, target_data_json, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id) DO UPDATE SET
+            left_label=excluded.left_label,
+            right_label=excluded.right_label,
+            source_data_json=excluded.source_data_json,
+            target_data_json=excluded.target_data_json,
+            updated_at=excluded.updated_at
+    """, (project_id, left_label, right_label, s_json, t_json, now))
+    conn.commit()
+    conn.close()
+
+def reset_workspace_data(project_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute("""
+        UPDATE project_workspaces 
+        SET source_data_json = NULL, target_data_json = NULL, updated_at = ? 
+        WHERE project_id = ?
+    """, (now, project_id))
+    conn.commit()
+    conn.close()
+
 def get_saved_mappings():
     conn = get_db_connection()
-    df = pd.read_sql_query("SELECT school_name, foundation_name FROM account_mappings", conn)
+    df = pd.read_sql_query("SELECT source_name, target_name FROM account_mappings", conn)
     conn.close()
-    mapping_dict = dict(zip(df['school_name'], df['foundation_name']))
-    return mapping_dict
+    return dict(zip(df['source_name'], df['target_name']))
 
 def save_mapping_rules(mapping_list):
     conn = get_db_connection()
     cursor = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     for item in mapping_list:
-        school_name = item.get("school_name", "")
-        foundation_name = item.get("foundation_name", "")
-        if school_name and foundation_name:
+        s_name = item.get("source_name", "").strip()
+        t_name = item.get("target_name", "").strip()
+        if s_name and t_name and t_name != "(매칭 제외)":
             cursor.execute("""
-                INSERT INTO account_mappings (school_name, foundation_name, updated_at)
+                INSERT INTO account_mappings (source_name, target_name, updated_at)
                 VALUES (?, ?, ?)
-                ON CONFLICT(school_name, foundation_name) 
+                ON CONFLICT(source_name, target_name) 
                 DO UPDATE SET updated_at=excluded.updated_at
-            """, (school_name, foundation_name, now))
+            """, (s_name, t_name, now))
     conn.commit()
     conn.close()
 
@@ -108,7 +174,7 @@ with st.sidebar:
     st.header("📂 프로젝트 관리")
     
     with st.expander("➕ 새 프로젝트 만들기", expanded=False):
-        new_proj_name = st.text_input("프로젝트 이름", placeholder="예: 2025학년도 본결산_등록금회계")
+        new_proj_name = st.text_input("프로젝트 이름", placeholder="예: 2025학년도 결산 검증")
         if st.button("프로젝트 생성", use_container_width=True):
             if new_proj_name.strip():
                 if create_project(new_proj_name.strip()):
@@ -125,90 +191,130 @@ with st.sidebar:
         project_names = projects_df['name'].tolist()
         selected_project_name = st.selectbox("📋 작업할 프로젝트 선택", project_names)
         current_project = projects_df[projects_df['name'] == selected_project_name].iloc[0]
+        curr_project_id = int(current_project['id'])
         st.caption(f"생성일시: {current_project['created_at']}")
         
         if st.button("🗑️ 현재 프로젝트 삭제", type="secondary", use_container_width=True):
-            delete_project(current_project['id'])
+            delete_project(curr_project_id)
             st.warning("프로젝트가 삭제되었습니다.")
             st.rerun()
     else:
         selected_project_name = None
+        curr_project_id = None
         st.info("왼쪽 상단에서 새 프로젝트를 먼저 생성해 주세요.")
 
 # ==========================================
-# 4. 메인 화면 로직
+# 4. 메인 화면 헤더 및 설명
 # ==========================================
-st.title("📊 대학-사학진흥재단 결산서 스마트 검증기")
-st.markdown("학교 자체 결산서와 사학진흥재단 제출 양식을 대조하여 계정별 입력 오류와 차액을 자동으로 검증합니다.")
+st.title("📊 데이터 스마트 검증기")
+st.markdown("서로 다른 두 양식의 데이터를 스마트 매칭하여 항목별 입력 오류와 차액을 자동으로 대조·검증합니다.")
 
 if not selected_project_name:
     st.warning("👈 왼쪽 사이드바에서 프로젝트를 생성하거나 선택해 주세요.")
     st.stop()
 
-st.info(f"📌 현재 활성 프로젝트: **{selected_project_name}**")
+# 현재 프로젝트의 DB 저장 데이터 불러오기
+workspace_state = get_workspace(curr_project_id)
 
-# 세션 상태 초기화
-if "school_df" not in st.session_state:
-    st.session_state.school_df = None
-if "foundation_df" not in st.session_state:
-    st.session_state.foundation_df = None
+top_c1, top_c2 = st.columns([3, 1])
+with top_c1:
+    st.info(f"📌 현재 활성 프로젝트: **{selected_project_name}**")
+with top_c2:
+    if st.button("🔄 데이터 초기화 (새 파일 업로드)", use_container_width=True):
+        reset_workspace_data(curr_project_id)
+        st.success("데이터가 초기화되었습니다.")
+        st.rerun()
 
 # ----------------------------------------------------
-# 1단계: 엑셀 파일 업로드 및 시트 지정
+# 1단계: 대조 대상 엑셀 파일 업로드 및 명칭 설정
 # ----------------------------------------------------
-st.subheader("1단계: 결산서 엑셀 파일 업로드 및 시트 지정")
+st.subheader("1단계: 대조 대상 엑셀 파일 업로드 및 시트 지정")
+st.caption("비교할 두 엑셀 파일의 라벨을 원하는 이름으로 변경할 수 있으며, 새로고침해도 작업 상태가 자동 보존됩니다.")
+
+lbl_c1, lbl_c2 = st.columns(2)
+with lbl_c1:
+    left_label_input = st.text_input(
+        "왼쪽 파일 라벨 (기준 데이터)", 
+        value=workspace_state["left_label"], 
+        key=f"left_lbl_{curr_project_id}"
+    )
+with lbl_c2:
+    right_label_input = st.text_input(
+        "오른쪽 파일 라벨 (대조 데이터)", 
+        value=workspace_state["right_label"], 
+        key=f"right_lbl_{curr_project_id}"
+    )
+
+# 라벨 변경 시 DB 업데이트
+if (left_label_input != workspace_state["left_label"]) or (right_label_input != workspace_state["right_label"]):
+    update_workspace(
+        curr_project_id, 
+        left_label_input, 
+        right_label_input, 
+        workspace_state["source_data"], 
+        workspace_state["target_data"]
+    )
+    st.rerun()
+
 col1, col2 = st.columns(2)
 
+source_df = workspace_state["source_data"]
+target_df = workspace_state["target_data"]
+
 with col1:
-    st.markdown("##### 🏫 학교 자체 결산서 (.xlsx)")
-    school_file = st.file_uploader("학교 결산서 파일 업로드", type=["xlsx"], key="school_uploader")
-    school_sheet = None
+    st.markdown(f"##### 📁 {left_label_input} (.xlsx)")
+    school_file = st.file_uploader(f"{left_label_input} 파일 업로드", type=["xlsx"], key=f"s_file_{curr_project_id}")
     if school_file:
         try:
-            xl_school = pd.ExcelFile(school_file)
-            school_sheet = st.selectbox("학교 결산서 대상 시트 선택", xl_school.sheet_names, key="school_sheet_select")
-            if school_sheet:
-                st.session_state.school_df = pd.read_excel(school_file, sheet_name=school_sheet)
-                st.success(f"학교 데이터 로드 완료 ({len(st.session_state.school_df)}행)")
+            xl_s = pd.ExcelFile(school_file)
+            s_sheet = st.selectbox(f"{left_label_input} 대상 시트 선택", xl_s.sheet_names, key=f"s_sheet_{curr_project_id}")
+            if s_sheet:
+                source_df = pd.read_excel(school_file, sheet_name=s_sheet)
+                update_workspace(curr_project_id, left_label_input, right_label_input, source_df, target_df)
+                st.success(f"{left_label_input} 로드 및 DB 저장 완료 ({len(source_df)}행)")
         except Exception as e:
-            st.error(f"학교 파일 읽기 오류: {e}")
+            st.error(f"파일 읽기 오류: {e}")
+    elif source_df is not None:
+        st.info(f"💾 이전에 저장된 {left_label_input} 유지 중 ({len(source_df)}행)")
 
 with col2:
-    st.markdown("##### 🏛️ 사학진흥재단 양식 (.xlsx)")
-    foundation_file = st.file_uploader("사학진흥재단 양식 파일 업로드", type=["xlsx"], key="found_uploader")
-    foundation_sheet = None
-    if foundation_file:
+    st.markdown(f"##### 📁 {right_label_input} (.xlsx)")
+    found_file = st.file_uploader(f"{right_label_input} 파일 업로드", type=["xlsx"], key=f"t_file_{curr_project_id}")
+    if found_file:
         try:
-            xl_found = pd.ExcelFile(foundation_file)
-            foundation_sheet = st.selectbox("재단 양식 대상 시트 선택", xl_found.sheet_names, key="found_sheet_select")
-            if foundation_sheet:
-                st.session_state.foundation_df = pd.read_excel(foundation_file, sheet_name=foundation_sheet)
-                st.success(f"재단 데이터 로드 완료 ({len(st.session_state.foundation_df)}행)")
+            xl_t = pd.ExcelFile(found_file)
+            t_sheet = st.selectbox(f"{right_label_input} 대상 시트 선택", xl_t.sheet_names, key=f"t_sheet_{curr_project_id}")
+            if t_sheet:
+                target_df = pd.read_excel(found_file, sheet_name=t_sheet)
+                update_workspace(curr_project_id, left_label_input, right_label_input, source_df, target_df)
+                st.success(f"{right_label_input} 로드 및 DB 저장 완료 ({len(target_df)}행)")
         except Exception as e:
-            st.error(f"재단 파일 읽기 오류: {e}")
+            st.error(f"파일 읽기 오류: {e}")
+    elif target_df is not None:
+        st.info(f"💾 이전에 저장된 {right_label_input} 유지 중 ({len(target_df)}행)")
 
-# 두 파일 모두 로드된 경우 다음 단계 진행
-if st.session_state.school_df is not None and st.session_state.foundation_df is not None:
+# 두 파일 데이터가 모두 준비된 경우에만 다음 단계 진행
+if source_df is not None and target_df is not None:
     st.divider()
     
     # ----------------------------------------------------
-    # 2단계: 기준 열(Column) 지정 (계정코드 제외, 계정과목명만 지정)
+    # 2단계: 기준 열(Column) 지정
     # ----------------------------------------------------
     st.subheader("2단계: 대조할 열(Column) 설정")
     
     col_c1, col_c2 = st.columns(2)
     with col_c1:
-        st.markdown("**[학교 결산서]**")
-        school_cols = list(st.session_state.school_df.columns)
-        s_name_col = st.selectbox("학교 계정과목명 열", school_cols, index=0)
+        st.markdown(f"**[{left_label_input}]**")
+        source_cols = list(source_df.columns)
+        s_name_col = st.selectbox(f"{left_label_input} 항목명(계정과목) 열", source_cols, index=0)
         
     with col_c2:
-        st.markdown("**[사학진흥재단 양식]**")
-        found_cols = list(st.session_state.foundation_df.columns)
-        f_name_col = st.selectbox("재단 계정과목명 열", found_cols, index=0)
+        st.markdown(f"**[{right_label_input}]**")
+        target_cols = list(target_df.columns)
+        t_name_col = st.selectbox(f"{right_label_input} 항목명(계정과목) 열", target_cols, index=0)
 
     st.markdown("**[비교할 금액 열(Column) 짝짓기]**")
-    st.caption("예산액, 결산액 등 비교할 금액 열들을 각각 선택해 주세요.")
+    st.caption("예산액, 결산액 등 비교할 금액 열들을 각각 짝지어 선택해 주세요.")
     
     amount_col_count = st.number_input("비교할 금액 열 개수", min_value=1, max_value=5, value=1)
     matched_amount_cols = []
@@ -216,55 +322,54 @@ if st.session_state.school_df is not None and st.session_state.foundation_df is 
     for i in range(amount_col_count):
         ac1, ac2 = st.columns(2)
         with ac1:
-            s_amt = st.selectbox(f"금액 열 #{i+1} (학교 결산서)", school_cols, key=f"s_amt_{i}")
+            s_amt = st.selectbox(f"금액 열 #{i+1} ({left_label_input})", source_cols, key=f"s_amt_{i}")
         with ac2:
-            f_amt = st.selectbox(f"금액 열 #{i+1} (재단 양식)", found_cols, key=f"f_amt_{i}")
-        matched_amount_cols.append((s_amt, f_amt))
+            t_amt = st.selectbox(f"금액 열 #{i+1} ({right_label_input})", target_cols, key=f"t_amt_{i}")
+        matched_amount_cols.append((s_amt, t_amt))
         
     st.divider()
 
     # ----------------------------------------------------
-    # 3단계: 스마트 계정과목 매칭 엔진
+    # 3단계: 스마트 항목 매칭 엔진
     # ----------------------------------------------------
-    st.subheader("3단계: 계정과목 스마트 매칭")
-    st.markdown("DB 저장 기록, 완전 일치, 유사도 분석을 거쳐 최적의 재단 계정과목을 자동 추천합니다.")
+    st.subheader("3단계: 항목(계정과목) 스마트 매칭")
+    st.markdown("DB 과거 매칭 기록, 완전 일치, 유사도 분석을 거쳐 최적의 매칭 항목을 자동 추천합니다.")
 
     # 데이터 정리
-    s_df_clean = st.session_state.school_df.dropna(subset=[s_name_col]).copy()
-    f_df_clean = st.session_state.foundation_df.dropna(subset=[f_name_col]).copy()
+    s_df_clean = source_df.dropna(subset=[s_name_col]).copy()
+    t_df_clean = target_df.dropna(subset=[t_name_col]).copy()
     
     s_df_clean[s_name_col] = s_df_clean[s_name_col].astype(str).str.strip()
-    f_df_clean[f_name_col] = f_df_clean[f_name_col].astype(str).str.strip()
+    t_df_clean[t_name_col] = t_df_clean[t_name_col].astype(str).str.strip()
     
-    foundation_unique_names = ["(매칭 제외)"] + sorted(f_df_clean[f_name_col].unique().tolist())
+    target_unique_names = ["(매칭 제외)"] + sorted(t_df_clean[t_name_col].unique().tolist())
     saved_history = get_saved_mappings()
     
-    # 고유 학교 계정과목 목록 추출
-    unique_school_accounts = sorted(s_df_clean[s_name_col].unique().tolist())
+    # 고유 항목명 목록 추출
+    unique_source_items = sorted(s_df_clean[s_name_col].unique().tolist())
     
     mapping_form_data = []
     st.write("아래 매칭 결과를 확인하시고, 필요한 경우 드롭다운을 열어 직접 변경해 주세요:")
     
-    with st.expander("🔍 계정과목 매칭 테이블 펼치기 / 접기", expanded=True):
+    with st.expander("🔍 항목 매칭 테이블 펼치기 / 접기", expanded=True):
         m_head1, m_head2, m_head3 = st.columns([3, 3, 1.5])
-        m_head1.markdown("**학교 계정과목명**")
-        m_head2.markdown("**매칭할 사학진흥재단 계정명**")
+        m_head1.markdown(f"**{left_label_input} 항목명**")
+        m_head2.markdown(f"**매칭할 {right_label_input} 항목명**")
         m_head3.markdown("**매칭 판정**")
 
-        for idx, name_val in enumerate(unique_school_accounts):
-            # 매칭 우선순위 판단
+        for idx, name_val in enumerate(unique_source_items):
             selected_match = "(매칭 제외)"
             status_text = "미매칭"
             
-            if name_val in saved_history and saved_history[name_val] in foundation_unique_names:
+            # 매칭 우선순위 로직
+            if name_val in saved_history and saved_history[name_val] in target_unique_names:
                 selected_match = saved_history[name_val]
                 status_text = "💾 DB기억"
-            elif name_val in foundation_unique_names:
+            elif name_val in target_unique_names:
                 selected_match = name_val
                 status_text = "🎯 완전일치"
             else:
-                # 유사도 분석
-                candidates = difflib.get_close_matches(name_val, foundation_unique_names[1:], n=1, cutoff=0.4)
+                candidates = difflib.get_close_matches(name_val, target_unique_names[1:], n=1, cutoff=0.4)
                 if candidates:
                     selected_match = candidates[0]
                     status_text = "🤖 AI추천"
@@ -272,24 +377,23 @@ if st.session_state.school_df is not None and st.session_state.foundation_df is 
             col_m1, col_m2, col_m3 = st.columns([3, 3, 1.5])
             col_m1.text(name_val)
             
-            default_index = foundation_unique_names.index(selected_match) if selected_match in foundation_unique_names else 0
+            default_index = target_unique_names.index(selected_match) if selected_match in target_unique_names else 0
             user_choice = col_m2.selectbox(
                 f"선택_{idx}", 
-                foundation_unique_names, 
+                target_unique_names, 
                 index=default_index, 
-                key=f"match_select_{idx}",
+                key=f"match_select_{curr_project_id}_{idx}",
                 label_visibility="collapsed"
             )
             col_m3.caption(status_text)
             
             mapping_form_data.append({
-                "school_name": name_val,
-                "foundation_name": user_choice
+                "source_name": name_val,
+                "target_name": user_choice
             })
             
-        if st.button("💾 현재 매칭 규칙 DB에 저장하기 (다음 결산 때 자동 기억)", type="primary"):
-            valid_mappings = [m for m in mapping_form_data if m["foundation_name"] != "(매칭 제외)"]
-            save_mapping_rules(valid_mappings)
+        if st.button("💾 현재 매칭 규칙 DB에 영구 저장하기 (다음 작업 시 자동 기억)", type="primary"):
+            save_mapping_rules(mapping_form_data)
             st.success("매칭 규칙이 영구 데이터베이스(SQLite)에 성공적으로 저장되었습니다!")
 
     st.divider()
@@ -297,11 +401,10 @@ if st.session_state.school_df is not None and st.session_state.foundation_df is 
     # ----------------------------------------------------
     # 4단계: 실시간 금액 대조 및 오류 검증
     # ----------------------------------------------------
-    st.subheader("4단계: 결산 금액 대조 및 불일치 검증 결과")
+    st.subheader("4단계: 데이터 대조 및 불일치 검증 결과")
     
-    mapping_dict = {item["school_name"]: item["foundation_name"] for item in mapping_form_data}
+    mapping_dict = {item["source_name"]: item["target_name"] for item in mapping_form_data}
     
-    # 금액 숫자 변환 보조 함수
     def clean_number(val):
         if pd.isna(val):
             return 0.0
@@ -313,46 +416,45 @@ if st.session_state.school_df is not None and st.session_state.foundation_df is 
         except ValueError:
             return 0.0
 
-    # 재단 데이터 계정별 합산 (재단 계정명 기준)
-    f_grouped = f_df_clean.copy()
-    for _, f_amt in matched_amount_cols:
-        f_grouped[f_amt] = f_grouped[f_amt].apply(clean_number)
-    f_summary = f_grouped.groupby(f_name_col)[[f_amt for _, f_amt in matched_amount_cols]].sum().reset_index()
+    # 대조 데이터 항목별 합산
+    t_grouped = t_df_clean.copy()
+    for _, t_amt in matched_amount_cols:
+        t_grouped[t_amt] = t_grouped[t_amt].apply(clean_number)
+    t_summary = t_grouped.groupby(t_name_col)[[t_amt for _, t_amt in matched_amount_cols]].sum().reset_index()
 
-    # 학교 데이터 집계 및 병합
+    # 기준 데이터 집계 및 병합
     s_grouped = s_df_clean.copy()
     for s_amt, _ in matched_amount_cols:
         s_grouped[s_amt] = s_grouped[s_amt].apply(clean_number)
     
-    # 학교 데이터에 매칭된 재단 계정명 부여
-    s_grouped["__matched_foundation_name"] = s_grouped[s_name_col].map(mapping_dict)
+    s_grouped["__matched_target_name"] = s_grouped[s_name_col].map(mapping_dict)
     
     result_rows = []
     for _, row in s_grouped.iterrows():
-        sch_name = row[s_name_col]
-        fd_name = row["__matched_foundation_name"]
+        s_name = row[s_name_col]
+        t_name = row["__matched_target_name"]
         
         row_res = {
-            "학교 계정과목명": sch_name,
-            "매칭 재단 계정명": fd_name if fd_name else "(미매칭)"
+            f"{left_label_input} 항목명": s_name,
+            f"매칭 {right_label_input} 항목명": t_name if t_name else "(미매칭)"
         }
         
         has_error = False
-        if not fd_name or fd_name == "(매칭 제외)":
-            for s_amt, f_amt in matched_amount_cols:
-                row_res[f"학교_{s_amt}"] = row[s_amt]
-                row_res[f"재단_{f_amt}"] = 0.0
-                row_res[f"차액({s_amt}-{f_amt})"] = row[s_amt]
+        if not t_name or t_name == "(매칭 제외)":
+            for s_amt, t_amt in matched_amount_cols:
+                row_res[f"{left_label_input}_{s_amt}"] = row[s_amt]
+                row_res[f"{right_label_input}_{t_amt}"] = 0.0
+                row_res[f"차액({s_amt}-{t_amt})"] = row[s_amt]
             row_res["검증 상태"] = "⚠️ 미매칭"
         else:
-            fd_match_rows = f_summary[f_summary[f_name_col] == fd_name]
-            for s_amt, f_amt in matched_amount_cols:
+            t_match_rows = t_summary[t_summary[t_name_col] == t_name]
+            for s_amt, t_amt in matched_amount_cols:
                 s_val = row[s_amt]
-                f_val = fd_match_rows[f_amt].values[0] if not fd_match_rows.empty else 0.0
-                diff = s_val - f_val
-                row_res[f"학교_{s_amt}"] = s_val
-                row_res[f"재단_{f_amt}"] = f_val
-                row_res[f"차액({s_amt}-{f_amt})"] = diff
+                t_val = t_match_rows[t_amt].values[0] if not t_match_rows.empty else 0.0
+                diff = s_val - t_val
+                row_res[f"{left_label_input}_{s_amt}"] = s_val
+                row_res[f"{right_label_input}_{t_amt}"] = t_val
+                row_res[f"차액({s_amt}-{t_amt})"] = diff
                 if abs(diff) > 0.01:
                     has_error = True
                     
@@ -362,17 +464,17 @@ if st.session_state.school_df is not None and st.session_state.foundation_df is 
         
     result_df = pd.DataFrame(result_rows)
 
-    # 요약 통계 대시보드
+    # 대시보드 메트릭
     total_count = len(result_df)
     match_count = len(result_df[result_df["검증 상태"] == "✅ 정상 일치"])
     error_count = len(result_df[result_df["검증 상태"] == "❌ 불일치(오류)"])
     unmatched_count = len(result_df[result_df["검증 상태"] == "⚠️ 미매칭"])
 
     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-    m_col1.metric("전체 계정 수", f"{total_count}건")
+    m_col1.metric("전체 항목 수", f"{total_count}건")
     m_col2.metric("정상 일치", f"{match_count}건")
     m_col3.metric("불일치(오류)", f"{error_count}건", delta=-error_count if error_count > 0 else 0)
-    m_col4.metric("미매칭 계정", f"{unmatched_count}건")
+    m_col4.metric("미매칭 항목", f"{unmatched_count}건")
 
     # 필터 옵션
     filter_option = st.radio("표시할 결과 선택", ["전체 보기", "❌ 불일치(오류) 항목만 보기", "⚠️ 미매칭 항목만 보기"], horizontal=True)
@@ -396,7 +498,7 @@ if st.session_state.school_df is not None and st.session_state.foundation_df is 
         result_df.to_excel(writer, index=False, sheet_name="검증결과리포트")
     excel_buffer.seek(0)
     
-    file_name = f"결산검증결과_{selected_project_name}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    file_name = f"검증결과_{selected_project_name}_{datetime.now().strftime('%Y%m%d')}.xlsx"
     
     st.download_button(
         label="📥 검증 결과 엑셀(.xlsx) 파일 내려받기",
