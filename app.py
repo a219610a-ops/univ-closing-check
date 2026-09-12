@@ -4,6 +4,7 @@ import sqlite3
 import io
 import difflib
 import re
+import json
 from datetime import datetime
 
 # ==========================================
@@ -18,12 +19,9 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    /* 전체 배경 */
     .stApp {
         background-color: #F8FAFC;
     }
-    
-    /* 상단 타이틀 최적화 */
     .main-app-title {
         font-size: 21px !important;
         font-weight: 700 !important;
@@ -36,8 +34,6 @@ st.markdown("""
         color: #64748B !important;
         margin-bottom: 14px !important;
     }
-    
-    /* 요약 카드 스타일 */
     .kpi-card {
         background-color: #FFFFFF;
         border: 1px solid #E2E8F0;
@@ -50,8 +46,6 @@ st.markdown("""
         font-weight: 700;
         margin-top: 2px;
     }
-    
-    /* 데이터프레임/에디터 컨테이너 */
     [data-testid="stDataFrame"] {
         border-radius: 8px;
         border: 1px solid #CBD5E1;
@@ -61,7 +55,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. SQLite 데이터베이스 초기화 및 자동 보정
+# 2. SQLite 데이터베이스 초기화 및 설정 테이블 확장
 # ==========================================
 def get_db_connection():
     conn = sqlite3.connect("accounting_audit.db", check_same_thread=False)
@@ -80,41 +74,15 @@ def init_db():
         )
     """)
     
-    cursor.execute("SELECT count(name) FROM sqlite_master WHERE type='table' AND name='account_mappings'")
-    table_exists = cursor.fetchone()[0] > 0
-    
-    if table_exists:
-        cursor.execute("PRAGMA table_info(account_mappings)")
-        columns = [col[1] for col in cursor.fetchall()]
-        if "school_name" in columns and "source_name" not in columns:
-            cursor.execute("ALTER TABLE account_mappings RENAME TO account_mappings_old")
-            cursor.execute("""
-                CREATE TABLE account_mappings (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    source_name TEXT NOT NULL,
-                    target_name TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(source_name, target_name)
-                )
-            """)
-            try:
-                cursor.execute("""
-                    INSERT OR IGNORE INTO account_mappings (source_name, target_name, updated_at)
-                    SELECT school_name, foundation_name, updated_at FROM account_mappings_old
-                """)
-            except Exception:
-                pass
-            cursor.execute("DROP TABLE IF EXISTS account_mappings_old")
-    else:
-        cursor.execute("""
-            CREATE TABLE account_mappings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_name TEXT NOT NULL,
-                target_name TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(source_name, target_name)
-            )
-        """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS account_mappings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_name TEXT NOT NULL,
+            target_name TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(source_name, target_name)
+        )
+    """)
         
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS project_workspaces (
@@ -123,10 +91,21 @@ def init_db():
             right_label TEXT,
             source_data_json TEXT,
             target_data_json TEXT,
+            settings_json TEXT,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         )
     """)
+    
+    # settings_json 컬럼 존재 여부 확인 후 없으면 추가
+    cursor.execute("PRAGMA table_info(project_workspaces)")
+    cols = [c[1] for c in cursor.fetchall()]
+    if "settings_json" not in cols:
+        try:
+            cursor.execute("ALTER TABLE project_workspaces ADD COLUMN settings_json TEXT")
+        except Exception:
+            pass
+
     conn.commit()
     conn.close()
 
@@ -146,8 +125,8 @@ def create_project(name):
         cursor.execute("INSERT INTO projects (name, created_at) VALUES (?, ?)", (name, now))
         new_id = cursor.lastrowid
         cursor.execute("""
-            INSERT INTO project_workspaces (project_id, left_label, right_label, source_data_json, target_data_json, updated_at)
-            VALUES (?, '학교 양식', '재단 양식', NULL, NULL, ?)
+            INSERT INTO project_workspaces (project_id, left_label, right_label, source_data_json, target_data_json, settings_json, updated_at)
+            VALUES (?, '학교 양식', '재단 양식', NULL, NULL, '{}', ?)
         """, (new_id, now))
         conn.commit()
         success = True
@@ -166,26 +145,30 @@ def delete_project(project_id):
 def get_workspace(project_id):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT left_label, right_label, source_data_json, target_data_json FROM project_workspaces WHERE project_id = ?", (project_id,))
+    cursor.execute("SELECT left_label, right_label, source_data_json, target_data_json, settings_json FROM project_workspaces WHERE project_id = ?", (project_id,))
     row = cursor.fetchone()
     conn.close()
     if row:
         s_df = None
         t_df = None
+        settings = {}
         try:
             if row[2]:
                 s_df = pd.read_json(io.StringIO(row[2]))
             if row[3]:
                 t_df = pd.read_json(io.StringIO(row[3]))
+            if row[4]:
+                settings = json.loads(row[4])
         except Exception:
             pass
         return {
             "left_label": row[0] or "학교 양식",
             "right_label": row[1] or "재단 양식",
             "source_data": s_df,
-            "target_data": t_df
+            "target_data": t_df,
+            "settings": settings
         }
-    return {"left_label": "학교 양식", "right_label": "재단 양식", "source_data": None, "target_data": None}
+    return {"left_label": "학교 양식", "right_label": "재단 양식", "source_data": None, "target_data": None, "settings": {}}
 
 def update_workspace(project_id, left_label, right_label, source_df, target_df):
     conn = get_db_connection()
@@ -207,13 +190,26 @@ def update_workspace(project_id, left_label, right_label, source_df, target_df):
     conn.commit()
     conn.close()
 
+def save_workspace_settings(project_id, settings_dict):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    s_str = json.dumps(settings_dict, ensure_ascii=False)
+    cursor.execute("""
+        UPDATE project_workspaces
+        SET settings_json = ?, updated_at = ?
+        WHERE project_id = ?
+    """, (s_str, now, project_id))
+    conn.commit()
+    conn.close()
+
 def reset_workspace_data(project_id):
     conn = get_db_connection()
     cursor = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute("""
         UPDATE project_workspaces 
-        SET source_data_json = NULL, target_data_json = NULL, updated_at = ? 
+        SET source_data_json = NULL, target_data_json = NULL, settings_json = '{}', updated_at = ? 
         WHERE project_id = ?
     """, (now, project_id))
     conn.commit()
@@ -371,8 +367,10 @@ def extract_smart_grand_total(df, name_col, amt_col, target_total_type="수입",
     return float(pure_sum), "세부계정 순합계"
 
 # ==========================================
-# 5. 사이드바: 프로젝트 관리
+# 5. 사이드바: 프로젝트 관리 (URL 상태 연동)
 # ==========================================
+projects_df = get_projects()
+
 with st.sidebar:
     st.header("📂 프로젝트 관리")
     
@@ -388,11 +386,16 @@ with st.sidebar:
             else:
                 st.warning("이름을 입력해 주세요.")
                 
-    projects_df = get_projects()
-    
     if not projects_df.empty:
         project_names = projects_df['name'].tolist()
-        selected_project_name = st.selectbox("📋 작업 대상 프로젝트", project_names)
+        
+        # URL 쿼리 파라미터에서 이전 프로젝트 복원
+        url_proj = st.query_params.get("project", None)
+        default_idx = project_names.index(url_proj) if url_proj in project_names else 0
+        
+        selected_project_name = st.selectbox("📋 작업 대상 프로젝트", project_names, index=default_idx)
+        st.query_params["project"] = selected_project_name  # URL 상태 즉시 동기화
+        
         current_project = projects_df[projects_df['name'] == selected_project_name].iloc[0]
         curr_project_id = int(current_project['id'])
         st.caption(f"생성일시: {current_project['created_at']}")
@@ -400,6 +403,8 @@ with st.sidebar:
         st.divider()
         if st.button("🗑️ 선택된 프로젝트 삭제", type="secondary", use_container_width=True):
             delete_project(curr_project_id)
+            if "project" in st.query_params:
+                del st.query_params["project"]
             st.warning("프로젝트가 삭제되었습니다.")
             st.rerun()
     else:
@@ -416,11 +421,12 @@ if not selected_project_name:
     st.stop()
 
 workspace_state = get_workspace(curr_project_id)
+saved_settings = workspace_state.get("settings", {})
 
 h_col1, h_col2 = st.columns([4, 1])
 with h_col1:
     st.markdown('<div class="main-app-title">📊 데이터 스마트 검증기</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="main-app-caption">📌 현재 프로젝트: <b>{selected_project_name}</b> | 엑셀형 인터랙티브 스마트 시트로 대량의 결산 데이터를 신속하게 검증합니다.</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="main-app-caption">📌 현재 프로젝트: <b>{selected_project_name}</b> | 설정 및 수정 사항이 자동으로 영구 유지됩니다.</div>', unsafe_allow_html=True)
 with h_col2:
     if st.button("🔄 데이터 초기화", use_container_width=True):
         reset_workspace_data(curr_project_id)
@@ -485,34 +491,47 @@ if source_df is None or target_df is None:
     st.stop()
 
 # ----------------------------------------------------
-# 2단계: 대조 열 설정 및 양측 총계 행 직접 지정
+# 2단계: 대조 열 및 총계 행 설정 (설정값 DB 영구 보존)
 # ----------------------------------------------------
-with st.expander("⚙️ 2단계: 대조 열 및 양측 총계 행 설정 (직접 지정 가능)", expanded=False):
+source_cols = list(source_df.columns)
+target_cols = list(target_df.columns)
+
+# DB에 저장되어 있던 이전 설정값 불러오기
+def_s_name = saved_settings.get("s_name_col", source_cols[0] if source_cols else None)
+def_t_name = saved_settings.get("t_name_col", target_cols[0] if target_cols else None)
+def_s_amt = saved_settings.get("s_amt", source_cols[min(2, len(source_cols)-1)] if source_cols else None)
+def_t_amt = saved_settings.get("t_amt", target_cols[min(2, len(target_cols)-1)] if target_cols else None)
+def_s_tot = saved_settings.get("forced_s_total_row", "(자동 감지)")
+def_t_tot = saved_settings.get("forced_t_total_row", "(자동 감지)")
+
+with st.expander("⚙️ 2단계: 대조 열 및 양측 총계 행 설정 (자동 저장됨)", expanded=False):
     col_c1, col_c2 = st.columns(2)
-    source_cols = list(source_df.columns)
-    target_cols = list(target_df.columns)
     with col_c1:
-        s_name_col = st.selectbox(f"{left_label_input} 항목명 열", source_cols, index=0)
+        s_name_idx = source_cols.index(def_s_name) if def_s_name in source_cols else 0
+        s_name_col = st.selectbox(f"{left_label_input} 항목명 열", source_cols, index=s_name_idx)
     with col_c2:
-        t_name_col = st.selectbox(f"{right_label_input} 항목명 열", target_cols, index=0)
+        t_name_idx = target_cols.index(def_t_name) if def_t_name in target_cols else 0
+        t_name_col = st.selectbox(f"{right_label_input} 항목명 열", target_cols, index=t_name_idx)
 
     ac1, ac2 = st.columns(2)
     with ac1:
-        s_amt = st.selectbox(f"비교할 금액 열 ({left_label_input})", source_cols, index=min(2, len(source_cols)-1))
+        s_amt_idx = source_cols.index(def_s_amt) if def_s_amt in source_cols else min(2, len(source_cols)-1)
+        s_amt = st.selectbox(f"비교할 금액 열 ({left_label_input})", source_cols, index=s_amt_idx)
     with ac2:
-        t_amt = st.selectbox(f"비교할 금액 열 ({right_label_input})", target_cols, index=min(2, len(target_cols)-1))
+        t_amt_idx = target_cols.index(def_t_amt) if def_t_amt in target_cols else min(2, len(target_cols)-1)
+        t_amt = st.selectbox(f"비교할 금액 열 ({right_label_input})", target_cols, index=t_amt_idx)
 
     st.markdown("---")
     st.markdown("##### 📌 공식 총계 행 지정 (좌우 각각 선택 및 실시간 금액 확인)")
-    st.caption("자동 감지 외에도, 엑셀 시트에 있는 모든 행 중에서 공식 총계로 삼을 행을 자유롭게 검색·지정할 수 있습니다.")
 
     tc1, tc2 = st.columns(2)
     s_candidates = get_all_row_candidates(source_df, s_name_col)
     with tc1:
+        s_tot_idx = s_candidates.index(def_s_tot) if def_s_tot in s_candidates else 0
         forced_s_total_row = st.selectbox(
             f"🏫 [{left_label_input}] 총계 행 선택",
             s_candidates,
-            index=0,
+            index=s_tot_idx,
             key=f"forced_s_tot_{curr_project_id}"
         )
         if forced_s_total_row != "(자동 감지)":
@@ -523,10 +542,11 @@ with st.expander("⚙️ 2단계: 대조 열 및 양측 총계 행 설정 (직�
 
     t_candidates = get_all_row_candidates(target_df, t_name_col)
     with tc2:
+        t_tot_idx = t_candidates.index(def_t_tot) if def_t_tot in t_candidates else 0
         forced_t_total_row = st.selectbox(
             f"🏛️ [{right_label_input}] 총계 행 선택",
             t_candidates,
-            index=0,
+            index=t_tot_idx,
             key=f"forced_t_tot_{curr_project_id}"
         )
         if forced_t_total_row != "(자동 감지)":
@@ -534,6 +554,18 @@ with st.expander("⚙️ 2단계: 대조 열 및 양측 총계 행 설정 (직�
             if not row_match_t.empty:
                 preview_amt_t = clean_number(row_match_t.iloc[-1][t_amt])
                 st.caption(f"확인된 금액: **{preview_amt_t:,.0f} 원**")
+
+    # 설정값이 변경되었으면 DB에 자동 영구 저장
+    current_settings = {
+        "s_name_col": s_name_col,
+        "t_name_col": t_name_col,
+        "s_amt": s_amt,
+        "t_amt": t_amt,
+        "forced_s_total_row": forced_s_total_row,
+        "forced_t_total_row": forced_t_total_row
+    }
+    if current_settings != saved_settings:
+        save_workspace_settings(curr_project_id, current_settings)
 
 # ----------------------------------------------------
 # 3단계: 정밀 총계 산출 및 데이터 매칭
@@ -570,13 +602,15 @@ target_options = ["(매칭 제외)"] + raw_target_list
 saved_history = get_saved_mappings()
 unique_source_items = sorted([str(x).strip() for x in s_df_clean[s_name_col].unique() if str(x).strip() and not is_aggregate_account(str(x))])
 
-# 매칭 행 구성
 matched_rows = []
 for s_name in unique_source_items:
     state_key = f"match_override_{curr_project_id}_{re.sub(r'[^a-zA-Z0-9가-힣]', '_', s_name)}"
     if state_key in st.session_state:
         selected_match = st.session_state[state_key]
         status_text = "✏️ 수동"
+    elif s_name in saved_history and saved_history[s_name] in target_options:
+        selected_match = saved_history[s_name]
+        status_text = "💾 저장됨"
     else:
         selected_match, status_text = find_smart_match(s_name, target_options, target_clean_dict, saved_history)
 
@@ -652,7 +686,7 @@ m4.markdown(f"""<div class="kpi-card" style="border-color: #FDE68A; background-c
 st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
 
 # ----------------------------------------------------
-# 5단계: 📑 엑셀형 인터랙티브 스마트 시트 (황금비율 열 너비 적용)
+# 5단계: 📑 엑셀형 인터랙티브 스마트 시트
 # ----------------------------------------------------
 ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1.8, 1.2])
 
@@ -694,16 +728,16 @@ if search_keyword.strip():
     t_col_name = f"매칭 {right_label_input} 항목명"
     display_df = display_df[display_df[s_col_name].str.contains(kw) | display_df[t_col_name].str.contains(kw)]
 
-st.info(f"💡 **인라인 편집 안내:** 아래 표에서 **[매칭 {right_label_input} 항목명]** 칸을 더블클릭하면 드롭다운으로 원하는 계정을 즉시 선택해 짝을 변경할 수 있습니다.")
+st.info(f"💡 **인라인 편집 안내:** 아래 표에서 **[매칭 {right_label_input} 항목명]** 칸을 더블클릭하여 변경한 뒤, 아래 **[💾 일괄 영구 저장]** 버튼을 누르면 영구 보존됩니다.")
 
 target_column_title = f"매칭 {right_label_input} 항목명"
 
-# ★ 핵심 개선: 좌우 균형 맞춘 픽셀 단위 황금비율 너비 적용
 edited_df = st.data_editor(
     display_df,
     use_container_width=True,
     height=480,
     hide_index=True,
+    key=f"editor_{curr_project_id}",
     column_config={
         "상태": st.column_config.TextColumn("검증 상태", width=85, disabled=True),
         f"{left_label_input} 항목명": st.column_config.TextColumn(f"{left_label_input} 항목명 (기준)", width=210, disabled=True),
@@ -718,7 +752,7 @@ edited_df = st.data_editor(
             help="클릭하여 대조할 재단 계정을 변경할 수 있습니다.",
             options=target_options,
             required=True,
-            width=210  # 대폭 축소하여 학교 항목명(210px)과 1:1 완벽 대칭
+            width=210
         ),
         f"{right_label_input} 결산액": st.column_config.NumberColumn(
             f"{right_label_input} 금액 (원)", 
@@ -750,6 +784,9 @@ with save_col2:
             
             if st.session_state.get(safe_key) != t_name:
                 st.session_state[safe_key] = t_name
+                batch_to_save[s_name] = t_name
+                changed_count += 1
+            elif s_name not in saved_history or saved_history[s_name] != t_name:
                 batch_to_save[s_name] = t_name
                 changed_count += 1
                 
