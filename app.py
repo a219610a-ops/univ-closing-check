@@ -155,6 +155,7 @@ def init_db():
             amount REAL NOT NULL,
             receipt_no TEXT NOT NULL,
             receipt_date TEXT NOT NULL,
+            donor_address TEXT DEFAULT '',
             is_statutory_transfer INTEGER DEFAULT 0,
             created_at TEXT NOT NULL
         )
@@ -205,6 +206,23 @@ def init_db():
         )
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS entity_info (
+            entity_type TEXT PRIMARY KEY,
+            org_name TEXT NOT NULL,
+            biz_no TEXT NOT NULL,
+            address TEXT NOT NULL,
+            law_basis TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+    cursor.execute("PRAGMA table_info(donation_receipts)")
+    r_cols = [c[1] for c in cursor.fetchall()]
+    if "donor_address" not in r_cols:
+        try: cursor.execute("ALTER TABLE donation_receipts ADD COLUMN donor_address TEXT DEFAULT ''")
+        except Exception: pass
+
     cursor.execute("PRAGMA table_info(donation_purposes)")
     p_cols = [c[1] for c in cursor.fetchall()]
     if "budget_subject" not in p_cols:
@@ -231,29 +249,57 @@ def init_db():
             VALUES (?, ?, ?, ?, ?)
         """, defaults)
 
-    cursor.execute("PRAGMA table_info(donation_receipts)")
-    r_cols = [c[1] for c in cursor.fetchall()]
-    current_y = datetime.now().year
-    if "fiscal_year" not in r_cols:
-        try: cursor.execute(f"ALTER TABLE donation_receipts ADD COLUMN fiscal_year INTEGER DEFAULT {current_y}")
-        except Exception: pass
-
-    cursor.execute("PRAGMA table_info(donation_expenses)")
-    e_cols = [c[1] for c in cursor.fetchall()]
-    if "fiscal_year" not in e_cols:
-        try: cursor.execute(f"ALTER TABLE donation_expenses ADD COLUMN fiscal_year INTEGER DEFAULT {current_y}")
-        except Exception: pass
-    if "receipt_id" not in e_cols:
-        try: cursor.execute("ALTER TABLE donation_expenses ADD COLUMN receipt_id INTEGER DEFAULT 0")
-        except Exception: pass
-    if "donor_name" not in e_cols:
-        try: cursor.execute("ALTER TABLE donation_expenses ADD COLUMN donor_name TEXT DEFAULT ''")
-        except Exception: pass
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute("SELECT COUNT(*) FROM entity_info WHERE entity_type = 'UNIVERSITY'")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("""
+            INSERT INTO entity_info (entity_type, org_name, biz_no, address, law_basis, updated_at)
+            VALUES ('UNIVERSITY', 'OO대학교', '123-82-00000', '경상북도 영천시 대학로 123', '「법인세법」 제24조제2항제1호라목', ?)
+        """, (now_str,))
+    
+    cursor.execute("SELECT COUNT(*) FROM entity_info WHERE entity_type = 'FOUNDATION'")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("""
+            INSERT INTO entity_info (entity_type, org_name, biz_no, address, law_basis, updated_at)
+            VALUES ('FOUNDATION', '학교법인 OO학원', '123-82-99999', '경상북도 영천시 대학로 123', '「법인세법」 제24조제2항제1호라목', ?)
+        """, (now_str,))
 
     conn.commit()
     conn.close()
 
 init_db()
+
+def get_entity_info(entity_type):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT org_name, biz_no, address, law_basis FROM entity_info WHERE entity_type = ?", (entity_type,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {"org_name": row[0], "biz_no": row[1], "address": row[2], "law_basis": row[3]}
+    return {
+        "org_name": "OO대학교" if entity_type == "UNIVERSITY" else "학교법인 OO학원",
+        "biz_no": "123-82-00000" if entity_type == "UNIVERSITY" else "123-82-99999",
+        "address": "경상북도 영천시 대학로 123",
+        "law_basis": "「법인세법」 제24조제2항제1호라목"
+    }
+
+def update_entity_info(entity_type, org_name, biz_no, address, law_basis):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute("""
+        INSERT INTO entity_info (entity_type, org_name, biz_no, address, law_basis, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(entity_type) DO UPDATE SET
+            org_name = excluded.org_name,
+            biz_no = excluded.biz_no,
+            address = excluded.address,
+            law_basis = excluded.law_basis,
+            updated_at = excluded.updated_at
+    """, (entity_type, org_name, biz_no, address, law_basis, now_str))
+    conn.commit()
+    conn.close()
 
 def parse_money(val_str):
     if not val_str:
@@ -277,11 +323,6 @@ def mask_id_number(raw_id):
     elif len(clean) == 10:
         return f"{clean[:3]}-{clean[3:5]}-{clean[5:]}"
     return f"{clean[:6]}******" if len(clean) > 6 else clean
-
-def simple_encrypt(raw_text):
-    if not raw_text:
-        return ""
-    return hashlib.sha256(raw_text.encode('utf-8')).hexdigest()
 
 def get_existing_fiscal_years(entity_type):
     conn = get_db_connection()
@@ -334,11 +375,11 @@ def get_hierarchical_purposes(entity_type):
 
 @st.dialog("🎉 일괄 기부금 수입 등록 완료")
 def show_batch_success_modal(month_val, count_val, total_amt_val, fiscal_yr):
-    st.success(f"**{fiscal_yr} 회계연도 [{month_val}월분] 기부금 수입이 성공적으로 등록되었습니다!**")
+    st.success(f"**{fiscal_yr} 회계연도 [{month_val}월분] 기부금 수입이 등록되었습니다!**")
     st.markdown(f"""
     * **등록 인원:** 총 **{count_val}** 명
     * **수입 합계액:** **{total_amt_val:,.0f}** 원
-    * **영수증 번호:** 영수증 발급 탭에서 기부일자순으로 일괄 번호 부여가 가능합니다.
+    * **영수증 발급:** '국세청 법정 영수증' 탭에서 기부일자순으로 번호 부여 및 주소 입력이 가능합니다.
     """)
     if st.button("확인 및 닫기", type="primary", use_container_width=True):
         st.rerun()
@@ -421,7 +462,7 @@ if st.session_state.current_page == "HOME":
             st.caption("대학 및 법인 기부금 수입·정기약정·원천별 지출·발급명세 통합 관리")
             st.markdown("""
             * **회계연도별 독립 관리** (2026, 2025 등 연도별 분리 정산)
-            * **기부일자순 영수증 번호 수동 지정 부여 및 법정 양식 실시간 출력**
+            * **기부일자순 영수증 번호 수동 지정 부여 및 법정 양식 실시간 출력**[cite: 1]
             * 교직원 급여공제 및 정기 약정자 관리 & 1클릭 당월 수입 일괄 채번
             * 수입 건 수정·삭제 관리 및 월별 / 전체 실시간 수입 합계 확인
             * 국세청 법정 기부금영수증 & 용도별 집행 정산표 엑셀 다운로드
@@ -543,6 +584,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
     conn.close()
 
     purpose_tree = get_hierarchical_purposes(current_entity)
+    entity_data = get_entity_info(current_entity)
 
     total_income = receipts_df['amount'].sum() if not receipts_df.empty else 0.0
     total_expense = expenses_df['amount'].sum() if not expenses_df.empty else 0.0
@@ -576,7 +618,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
     ])
 
     # ==========================================
-    # TAB 1: 📥 기부금 관리
+    # TAB 1: 📥 기부금 관리 (주소 입력은 영수증 탭으로 이관됨)
     # ==========================================
     with tab_manage:
         edit_row = None
@@ -592,7 +634,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
 
         with st.expander(expander_title, expanded=True):
             if is_edit_mode:
-                st.info(f"💡 현재 **[{edit_row['donor_name']} (현재 발급번호: {edit_row['receipt_no']})]** 님의 내역을 수정하고 있습니다.")
+                st.info(f"💡 현재 **[{edit_row['donor_name']} (발급번호: {edit_row['receipt_no']})]** 님의 내역을 수정하고 있습니다.")
 
             st.markdown("##### 1. 기부자 기본 정보")
             d1, d2, d3, d4 = st.columns(4)
@@ -608,11 +650,11 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             with d3:
                 donor_name = st.text_input("기부자 성명 / 법인명", value=edit_row['donor_name'] if is_edit_mode else "", key=f"dn_{current_year}_{is_edit_mode}", placeholder="예: 홍길동 또는 (주)회사명")
             with d4:
-                raw_id_no = st.text_input("주민등록번호 / 사업자번호", value=edit_row['id_number_masked'] if is_edit_mode else "", placeholder="예: 900101-1234567", type="password", help="보안을 위해 화면 마스킹 및 암호화 저장됩니다.", key=f"rid_{current_year}_{is_edit_mode}")
+                raw_id_no = st.text_input("주민등록번호 / 사업자번호", value=edit_row['id_number_cipher'] if (is_edit_mode and 'id_number_cipher' in edit_row and edit_row['id_number_cipher']) else (edit_row['id_number_masked'] if is_edit_mode else ""), placeholder="예: 900101-1234567", type="password", help="영수증 출력 시 공개/비공개 토글이 가능합니다.", key=f"rid_{current_year}_{is_edit_mode}")
 
             st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
-            st.markdown("##### 2. 기부 내역 및 회계 분류 (예산과목 ➔ 대분류 ➔ 소분류)")
+            st.markdown("##### 2. 기부 내역 및 회계 분류")
             
             amt_key = f"da_str_{current_year}_{is_edit_mode}"
             def format_amt_callback():
@@ -696,10 +738,11 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
 
             if submit_income:
                 if donor_name.strip() and d_amt > 0:
-                    masked_id = mask_id_number(raw_id_no) if (not is_edit_mode or (raw_id_no != edit_row['id_number_masked'])) else edit_row['id_number_masked']
-                    cipher_id = simple_encrypt(raw_id_no) if (not is_edit_mode or (raw_id_no != edit_row['id_number_masked'])) else edit_row['id_number_cipher']
+                    masked_id = mask_id_number(raw_id_no)
+                    stored_raw_id = raw_id_no.strip()
                     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     assigned_rec_no = edit_row['receipt_no'] if is_edit_mode else "미발급"
+                    existing_addr = edit_row['donor_address'] if is_edit_mode else ""
 
                     conn = get_db_connection()
                     cursor = conn.cursor()
@@ -715,7 +758,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                         """, (
                             str(d_date), budget_subj, final_purpose.strip() or "일반",
                             d_main_type, d_sub_type, donor_name.strip(),
-                            masked_id, cipher_id, d_type,
+                            masked_id, stored_raw_id, d_type,
                             d_code.strip(), float(d_amt), str(d_date), is_stat_chk,
                             int(edit_row['id'])
                         ))
@@ -731,13 +774,13 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                                 entity_type, fiscal_year, donation_date, budget_subject, purpose,
                                 donor_main_type, donor_sub_type, donor_name,
                                 id_number_masked, id_number_cipher, donation_type,
-                                code, amount, receipt_no, receipt_date, is_statutory_transfer, created_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                code, amount, receipt_no, receipt_date, donor_address, is_statutory_transfer, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             current_entity, current_year, str(d_date), budget_subj, final_purpose.strip() or "일반",
                             d_main_type, d_sub_type, donor_name.strip(),
-                            masked_id, cipher_id, d_type,
-                            d_code.strip(), float(d_amt), assigned_rec_no, str(d_date), is_stat_chk, now_str
+                            masked_id, stored_raw_id, d_type,
+                            d_code.strip(), float(d_amt), assigned_rec_no, str(d_date), existing_addr, is_stat_chk, now_str
                         ))
                         new_receipt_id = cursor.lastrowid
                         conn.commit()
@@ -1016,19 +1059,21 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         )
 
     # ==========================================
-    # TAB 3: 📑 국세청 법정 영수증 및 발급명세서
+    # TAB 3: 📑 국세청 법정 영수증 및 발급명세서 (별지 제63호의3서식 규격 완벽 복제)
     # ==========================================
     with tab_official:
         st.markdown(f"#### 📑 [{current_year} 회계연도] 국세청 법정 영수증 및 발급명세서 (별지 제63호의3서식)[cite: 1]")
-        st.caption("좌측에서 기부일자순으로 번호를 수동 일괄 부여하거나 직접 수정한 후, 선택 건에 대한 법정 규격 영수증을 우측에서 확인·인쇄합니다[cite: 1].")
+        st.caption("좌측에서 주소 입력, 번호 일괄 부여 및 선택을 수행하고, 우측에서 법정 서식을 확인·인쇄합니다.[cite: 1]")
 
         if not receipts_df.empty:
-            left_col, right_col = st.columns([1, 1.2], gap="large")
+            left_col, right_col = st.columns([1, 1.25], gap="large")
 
-            # 좌측: 시작번호 지정 부여, 기부일자순 목록 체크박스 및 수정
+            # 좌측: 검색, 시작번호 지정 부여, 기부자 주소 입력 및 선택
             with left_col:
-                st.markdown("##### 1. 영수증 발급번호 부여 및 대상 선택")
+                st.markdown("##### 1. 대상 검색 및 발급정보 설정 (번호·주소 입력)")
                 
+                search_q = st.text_input("🔍 기부자 성명 / 법인명 검색", placeholder="검색할 기부자명을 입력하세요...", key=f"search_donor_{current_year}")
+
                 b_assign_c1, b_assign_c2 = st.columns([1.5, 2.5])
                 with b_assign_c1:
                     default_start_no = f"{str(current_year)[-2:]}-01"
@@ -1051,26 +1096,30 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                             cursor.execute("UPDATE donation_receipts SET receipt_no = ? WHERE id = ?", (new_no, int(r_item['id'])))
                         conn.commit()
                         conn.close()
-                        st.success(f"총 {len(sorted_records)}건에 대해 '{start_no_input}'부터 기부일자순으로 번호가 일괄 부여되었습니다!")
+                        st.success(f"총 {len(sorted_records)}건에 대해 '{start_no_input}'부터 기부일자순 번호가 부여되었습니다!")
                         st.rerun()
 
-                st.caption("💡 **표 안내:** '선택' 체크박스로 우측 출력 대상을 지정하며, '발급번호'를 더블클릭하여 개별 직접 수정도 가능합니다.")
+                st.caption("💡 **표 안내:** '선택' 체크로 출력 대상을 지정하며, **'발급번호'와 '주소(소재지)'는 더블클릭하여 바로 입력·수정**할 수 있습니다.[cite: 1]")
 
-                table_prep = receipts_df[['id', 'receipt_no', 'donation_date', 'donor_name', 'amount', 'purpose']].copy()
+                table_prep = receipts_df[['id', 'receipt_no', 'donation_date', 'donor_name', 'amount', 'donor_address']].copy()
                 table_prep['선택'] = False
+                table_prep['donor_address'] = table_prep['donor_address'].fillna('')
                 table_prep.rename(columns={
                     'receipt_no': '발급번호',
                     'donation_date': '기부일자',
                     'donor_name': '기부자명',
                     'amount': '기부금액',
-                    'purpose': '사용용도'
+                    'donor_address': '주소(소재지)'
                 }, inplace=True)
+
+                if search_q.strip():
+                    table_prep = table_prep[table_prep['기부자명'].str.contains(search_q.strip(), na=False)]
 
                 if not table_prep.empty:
                     table_prep.loc[table_prep.index[0], '선택'] = True
 
                 edited_receipt_table = st.data_editor(
-                    table_prep[['선택', 'id', '발급번호', '기부일자', '기부자명', '기부금액', '사용용도']],
+                    table_prep[['선택', 'id', '발급번호', '기부일자', '기부자명', '기부금액', '주소(소재지)']],
                     use_container_width=True,
                     height=450,
                     hide_index=True,
@@ -1078,37 +1127,44 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     column_config={
                         "선택": st.column_config.CheckboxColumn("선택", width=60),
                         "id": None,
-                        "발급번호": st.column_config.TextColumn("발급번호 (직접수정)", width=120),
+                        "발급번호": st.column_config.TextColumn("발급번호 (직접수정)", width=110),
                         "기부일자": st.column_config.TextColumn("기부일자", width=95, disabled=True),
                         "기부자명": st.column_config.TextColumn("기부자명", width=90, disabled=True),
-                        "기부금액": st.column_config.NumberColumn("기부금액", format="%,d", width=105, disabled=True),
-                        "사용용도": st.column_config.TextColumn("용도", width=120, disabled=True)
+                        "기부금액": st.column_config.NumberColumn("기부금액", format="%,d", width=100, disabled=True),
+                        "주소(소재지)": st.column_config.TextColumn("주소(소재지) [직접입력]", width=200)
                     }
                 )
 
-                if st.button("💾 표에서 수정한 발급번호 저장", use_container_width=True):
+                if st.button("💾 표에서 수정한 발급번호 및 주소 영구 저장", type="primary", use_container_width=True):
                     conn = get_db_connection()
                     cursor = conn.cursor()
                     for _, e_row in edited_receipt_table.iterrows():
-                        cursor.execute("UPDATE donation_receipts SET receipt_no = ? WHERE id = ?", (str(e_row['발급번호']).strip(), int(e_row['id'])))
+                        cursor.execute("""
+                            UPDATE donation_receipts 
+                            SET receipt_no = ?, donor_address = ? 
+                            WHERE id = ?
+                        """, (str(e_row['발급번호']).strip(), str(e_row['주소(소재지)']).strip(), int(e_row['id'])))
                     conn.commit()
                     conn.close()
-                    st.success("발급번호가 저장되었습니다.")
+                    st.success("발급번호 및 기부자 주소가 저장되었습니다!")
                     st.rerun()
 
-            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 실시간 영수증 출력[cite: 1]
+            # 우측: 별지 제63호의3서식 100% 정밀 복제 뷰어[cite: 1]
             with right_col:
                 st.markdown("##### 2. 기부금 영수증 법정 서식 뷰어[cite: 1]")
+                
+                # 식별번호 공개/비공개 토글
+                show_unmasked_id = st.checkbox("👁️ 주민등록번호 / 사업자번호 전체 공개 (인쇄/제출용)", value=False, help="체크 시 마스킹을 해제하고 전체 번호를 표시합니다.[cite: 1]")
 
                 selected_rows = edited_receipt_table[edited_receipt_table['선택'] == True]
                 
                 if selected_rows.empty:
                     st.warning("👈 좌측 표에서 영수증을 출력할 기부자 건을 체크해 주세요.")
                 else:
-                    org_name = "OO대학교" if current_entity == "UNIVERSITY" else "학교법인 OO학원"
-                    org_biz_no = "123-82-00000" if current_entity == "UNIVERSITY" else "123-82-99999"
-                    org_addr = "경상북도 영천시 대학로 123"
-                    org_law = "「법인세법」 제24조제2항제1호라목 (코드 103)" if current_entity == "UNIVERSITY" else "「법인세법」 제24조제2항제1호라목 (코드 103)"[cite: 1]
+                    org_name = entity_data['org_name']
+                    org_biz_no = entity_data['biz_no']
+                    org_addr = entity_data['address']
+                    org_law = entity_data['law_basis']
 
                     full_printable_html = """<!DOCTYPE html>
 <html>
@@ -1116,15 +1172,14 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
 <meta charset="utf-8">
 <title>기부금영수증_인쇄</title>
 <style>
-    body { font-family: 'Malgun Gothic', '맑은 고딕', sans-serif; background:#FFF; margin:0; padding:15px; }
-    .receipt-container {
-        border: 2px solid #000; padding: 22px; margin-bottom: 25px; page-break-after: always;
-    }
+    body { font-family: 'Malgun Gothic', '맑은 고딕', sans-serif; background:#FFF; margin:0; padding:15px; color:#000; }
+    .receipt-container { border: 2px solid #000; padding: 22px; margin-bottom: 25px; page-break-after: always; }
     .receipt-header { text-align: center; border-bottom: 1.5px solid #000; padding-bottom: 6px; margin-bottom: 10px; }
     .receipt-title { font-size: 20px; font-weight: 800; letter-spacing: 4px; }
-    .receipt-table { width: 100%; border-collapse: collapse; margin-bottom: 10px; font-size: 11.5px; }
-    .receipt-table th, .receipt-table td { border: 1px solid #000; padding: 5px 7px; }
-    .receipt-table th { background-color: #F1F5F9; text-align: center; font-weight: 600; }
+    .receipt-table { width: 100%; border-collapse: collapse; margin-bottom: 10px; font-size: 11px; }
+    .receipt-table th, .receipt-table td { border: 1px solid #000; padding: 5px 6px; }
+    .receipt-table th { background-color: #F8FAFC; text-align: center; font-weight: 600; }
+    .stamp-box { display: inline-block; width: 65px; height: 65px; border: 1px dashed #94A3B8; vertical-align: middle; line-height: 65px; text-align: center; font-size: 10px; color: #64748B; margin-left: 8px; }
     @media print {
         .receipt-container { page-break-after: always; border: 2px solid #000; }
     }
@@ -1143,84 +1198,126 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                         except Exception:
                             y_str, m_str, day_str = current_year, 3, 1
 
+                        # 공개/비공개에 따른 식별번호 결정[cite: 1]
+                        if show_unmasked_id and orig_r['id_number_cipher'] and not orig_r['id_number_cipher'].startswith('***'):
+                            display_id = orig_r['id_number_cipher']
+                        else:
+                            display_id = orig_r['id_number_masked']
+
+                        # 주소 반영 (좌측 테이블에서 수정한 최신 주소 사용)[cite: 1]
+                        curr_addr = sel_item['주소(소재지)'] if sel_item['주소(소재지)'] else (orig_r['donor_address'] if orig_r['donor_address'] else "-")
+
                         card_html = (
-f'<div class="receipt-container" style="background:#FFF; border:2px solid #000; padding:20px; margin-bottom:18px; font-family:sans-serif;">'
-f'<div style="font-size:11px; color:#475569; display:flex; justify-content:space-between; margin-bottom:4px;">'
-f'<span>■ 법인세법 시행규칙 [별지 제63호의3서식] &lt;개정 2023.3.20.&gt;</span>'
-f'<span>(앞쪽)</span>'
+f'<div class="receipt-container" style="background:#FFF; border:2px solid #000; padding:22px; margin-bottom:18px; font-family:sans-serif; color:#000;">'
+f'<div style="font-size:10px; color:#475569; display:flex; justify-content:space-between; margin-bottom:4px;">'
+f'<span>■ 법인세법 시행규칙 [별지 제63호의3서식] &lt;개정 2023.3.20.&gt;[cite: 1]</span>'
+f'<span>(앞쪽)[cite: 1]</span>'
 f'</div>'
 f'<div style="font-size:12px; font-weight:700; margin-bottom:6px;">'
-f'일련번호: <span style="font-size:14px; text-decoration:underline; font-weight:800;">{sel_item["발급번호"]}</span>'
+f'일련번호: <span style="font-size:14px; text-decoration:underline; font-weight:800;">{sel_item["발급번호"]}</span>[cite: 1]'
 f'</div>'
 f'<div class="receipt-header" style="text-align:center; border-bottom:1.5px solid #000; padding-bottom:6px; margin-bottom:10px;">'
-f'<div class="receipt-title" style="font-size:20px; font-weight:800; letter-spacing:4px;">기부금 영수증</div>'
-f'<div style="font-size:10px; color:#64748B; margin-top:2px;">※ 뒤쪽의 작성방법을 읽고 작성하여 주시기 바랍니다.</div>'
+f'<div class="receipt-title" style="font-size:22px; font-weight:800; letter-spacing:5px;">기부금 영수증</div>[cite: 1]'
+f'<div style="font-size:10px; color:#64748B; margin-top:2px;">※ 뒤쪽의 작성방법을 읽고 작성하여 주시기 바랍니다.[cite: 1]</div>'
 f'</div>'
-f'<div style="font-size:12px; font-weight:700; margin:6px 0 3px 0;">● 기부자</div>'
-f'<table class="receipt-table" style="width:100%; border-collapse:collapse; margin-bottom:10px; font-size:11.5px;">'
+f'<div style="font-size:12px; font-weight:700; margin:6px 0 3px 0;">● 기부자[cite: 1]</div>'
+f'<table class="receipt-table" style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:11px;">'
 f'<tr>'
-f'<th style="border:1px solid #000; background:#F1F5F9; padding:5px; width:20%;">성명(법인명)</th>'
-f'<td style="border:1px solid #000; padding:5px; width:30%; font-weight:700;">{orig_r["donor_name"]}</td>'
-f'<th style="border:1px solid #000; background:#F1F5F9; padding:5px; width:25%;">주민등록번호<br>(사업자등록번호)</th>'
-f'<td style="border:1px solid #000; padding:5px; width:25%; font-family:monospace;">{orig_r["id_number_masked"]}</td>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:5px; width:22%;">성명(법인명)[cite: 1]</th>'
+f'<td style="border:1px solid #000; padding:5px; width:28%; font-weight:700;">{orig_r["donor_name"]}</td>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:5px; width:25%;">주민등록번호<br>(사업자등록번호)[cite: 1]</th>'
+f'<td style="border:1px solid #000; padding:5px; width:25%; font-family:monospace; font-weight:600;">{display_id}</td>'
 f'</tr>'
 f'<tr>'
-f'<th style="border:1px solid #000; background:#F1F5F9; padding:5px;">주소(소재지)</th>'
-f'<td colspan="3" style="border:1px solid #000; padding:5px;">-</td>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:5px;">주소(소재지)[cite: 1]</th>'
+f'<td colspan="3" style="border:1px solid #000; padding:5px;">{curr_addr}</td>'
 f'</tr>'
 f'</table>'
-f'<div style="font-size:12px; font-weight:700; margin:6px 0 3px 0;">● 기부금 단체</div>'
-f'<table class="receipt-table" style="width:100%; border-collapse:collapse; margin-bottom:10px; font-size:11.5px;">'
+f'<div style="font-size:12px; font-weight:700; margin:6px 0 3px 0;">● 기부금 단체[cite: 1]</div>'
+f'<table class="receipt-table" style="width:100%; border-collapse:collapse; margin-bottom:4px; font-size:11px;">'
 f'<tr>'
-f'<th style="border:1px solid #000; background:#F1F5F9; padding:5px; width:20%;">단체명</th>'
-f'<td style="border:1px solid #000; padding:5px; width:30%;">{org_name}</td>'
-f'<th style="border:1px solid #000; background:#F1F5F9; padding:5px; width:25%;">사업자등록번호(고유번호)</th>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:5px; width:22%;">단체명[cite: 1]</th>'
+f'<td style="border:1px solid #000; padding:5px; width:28%; font-weight:600;">{org_name}</td>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:5px; width:25%;">사업자등록번호<br>(고유번호)[cite: 1]</th>'
 f'<td style="border:1px solid #000; padding:5px; width:25%; font-family:monospace;">{org_biz_no}</td>'
 f'</tr>'
 f'<tr>'
-f'<th style="border:1px solid #000; background:#F1F5F9; padding:5px;">소재지</th>'
-f'<td colspan="3" style="border:1px solid #000; padding:5px;">{org_addr}</td>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:5px;">(지점명)[cite: 1]</th>'
+f'<td style="border:1px solid #000; padding:5px;"></td>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:5px;">(지점 사업자등록번호 등)[cite: 1]</th>'
+f'<td style="border:1px solid #000; padding:5px;"></td>'
 f'</tr>'
 f'<tr>'
-f'<th style="border:1px solid #000; background:#F1F5F9; padding:5px;">근거법령</th>'
-f'<td colspan="3" style="border:1px solid #000; padding:5px;">{org_law}</td>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:5px;">소재지[cite: 1]</th>'
+f'<td style="border:1px solid #000; padding:5px;">{org_addr}</td>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:5px;">기부금공제대상 공익법인등<br>근거법령[cite: 1]</th>'
+f'<td style="border:1px solid #000; padding:5px; font-size:10.5px;">{org_law}</td>'
+f'</tr>'
+f'<tr>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:5px;">(지점 소재지)[cite: 1]</th>'
+f'<td colspan="3" style="border:1px solid #000; padding:5px;"></td>'
 f'</tr>'
 f'</table>'
-f'<div style="font-size:12px; font-weight:700; margin:6px 0 3px 0;">● 기부내용</div>'
-f'<table class="receipt-table" style="width:100%; border-collapse:collapse; margin-bottom:10px; font-size:11.5px;">'
+f'<div style="font-size:9.5px; color:#64748B; margin-bottom:8px;">* 기부금 단체의 지점(분사무소)이 기부받은 경우, 지점명 등을 추가로 기재할 수 있습니다.[cite: 1]</div>'
+f'<div style="font-size:12px; font-weight:700; margin:6px 0 3px 0;">● 기부금 모집처(언론기관 등)[cite: 1]</div>'
+f'<table class="receipt-table" style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:11px;">'
 f'<tr>'
-f'<th style="border:1px solid #000; background:#F1F5F9; padding:5px; width:12%;">코드</th>'
-f'<th style="border:1px solid #000; background:#F1F5F9; padding:5px; width:18%;">구분(금전/현물)</th>'
-f'<th style="border:1px solid #000; background:#F1F5F9; padding:5px; width:18%;">연월일</th>'
-f'<th style="border:1px solid #000; background:#F1F5F9; padding:5px; width:26%;">품명 및 내용</th>'
-f'<th style="border:1px solid #000; background:#F1F5F9; padding:5px; width:26%;">금액(원)</th>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:5px; width:22%;">단체명[cite: 1]</th>'
+f'<td style="border:1px solid #000; padding:5px; width:28%;"></td>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:5px; width:25%;">사업자등록번호[cite: 1]</th>'
+f'<td style="border:1px solid #000; padding:5px; width:25%;"></td>'
+f'</tr>'
+f'<tr>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:5px;">소재지[cite: 1]</th>'
+f'<td colspan="3" style="border:1px solid #000; padding:5px;"></td>'
+f'</tr>'
+f'</table>'
+f'<div style="font-size:12px; font-weight:700; margin:6px 0 3px 0;">● 기부내용[cite: 1]</div>'
+f'<table class="receipt-table" style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:11px;">'
+f'<tr>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:4px; width:10%;">코드[cite: 1]</th>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:4px; width:14%;">구분<br>(금전/현물)[cite: 1]</th>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:4px; width:16%;">연월일[cite: 1]</th>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:4px; width:18%;">품명[cite: 1]</th>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:4px; width:42%;">내용[cite: 1]</th>'
 f'</tr>'
 f'<tr style="text-align:center;">'
 f'<td style="border:1px solid #000; padding:5px;">{orig_r["code"]}</td>'
 f'<td style="border:1px solid #000; padding:5px;">{orig_r["donation_type"]}</td>'
 f'<td style="border:1px solid #000; padding:5px;">{orig_r["donation_date"]}</td>'
+f'<td style="border:1px solid #000; padding:5px;">기부금</td>'
 f'<td style="border:1px solid #000; padding:5px;">{orig_r["purpose"]}</td>'
-f'<td style="border:1px solid #000; padding:5px; text-align:right; font-weight:700;">{int(orig_r["amount"]):,} 원</td>'
 f'</tr>'
 f'<tr>'
-f'<th colspan="4" style="border:1px solid #000; background:#F1F5F9; padding:5px; text-align:center;">합 계 금 액</th>'
-f'<td style="border:1px solid #000; padding:5px; text-align:right; font-weight:800; font-size:13px;">일금 {int(orig_r["amount"]):,} 원</td>'
+f'<th colspan="2" style="border:1px solid #000; background:#F8FAFC; padding:4px;">수량[cite: 1]</th>'
+f'<th colspan="2" style="border:1px solid #000; background:#F8FAFC; padding:4px;">단가[cite: 1]</th>'
+f'<th style="border:1px solid #000; background:#F8FAFC; padding:4px;">금액[cite: 1]</th>'
+f'</tr>'
+f'<tr style="text-align:center;">'
+f'<td colspan="2" style="border:1px solid #000; padding:5px;">-</td>'
+f'<td colspan="2" style="border:1px solid #000; padding:5px;">-</td>'
+f'<td style="border:1px solid #000; padding:5px; text-align:right; font-weight:800; font-size:12px;">{int(orig_r["amount"]):,} 원</td>'
 f'</tr>'
 f'</table>'
-f'<div style="font-size:11px; margin-top:10px; text-align:justify; line-height:1.4;">'
-f'「소득세법」 제34조, 「조세특례제한법」 제58조·제76조·제88조의4 및 「법인세법」 제24조에 따른 기부금을 위와 같이 기부하였음을 증명하여 주시기 바랍니다.'
+f'<div style="font-size:10.5px; margin-top:8px; text-align:justify; line-height:1.4;">'
+f'「소득세법」 제34조, 「조세특례제한법」 제58조·제76조·제88조의4 및 「법인세법」 제24조에 따른 기부금을 위와 같이 기부하였음을 증명하여 주시기 바랍니다.[cite: 1]'
 f'</div>'
-f'<div style="text-align:right; font-size:11.5px; margin-top:6px;">'
-f'신청인: &nbsp;&nbsp;<b>{orig_r["donor_name"]}</b> &nbsp;&nbsp;(서명 또는 인)'
+f'<div style="display:flex; justify-content:space-between; align-items:flex-end; margin-top:10px; font-size:11px;">'
+f'<div>신청인 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (서명 또는 인)[cite: 1]</div>'
+f'<div>{y_str} 년 &nbsp;&nbsp;&nbsp;&nbsp; {m_str} 월 &nbsp;&nbsp;&nbsp;&nbsp; {day_str} 일[cite: 1]</div>'
 f'</div>'
-f'<div style="margin-top:12px; border-top:1px dashed #CBD5E1; padding-top:8px; text-align:center;">'
-f'<div style="font-size:12.5px; font-weight:700;">위와 같이 기부금을 기부받았음을 증명합니다.</div>'
-f'<div style="font-size:12px; font-weight:600; margin:6px 0;">'
-f'{y_str} 년 &nbsp;&nbsp;&nbsp;&nbsp; {m_str} 월 &nbsp;&nbsp;&nbsp;&nbsp; {day_str} 일'
+f'<div style="margin-top:14px; border-top:1.5px solid #000; padding-top:10px; text-align:center;">'
+f'<div style="font-size:12px; font-weight:700;">위와 같이 기부금을 기부받았음을 증명합니다.[cite: 1]</div>'
+f'<div style="font-size:12px; font-weight:600; margin:8px 0;">'
+f'{y_str} 년 &nbsp;&nbsp;&nbsp;&nbsp; {m_str} 월 &nbsp;&nbsp;&nbsp;&nbsp; {day_str} 일[cite: 1]'
 f'</div>'
-f'<div style="font-size:14px; font-weight:800; margin-top:4px;">'
-f'기부금 수령인: &nbsp;&nbsp; {org_name} &nbsp;&nbsp; [ 직인생략 ]'
+f'<div style="display:flex; justify-content:center; align-items:center; margin-top:6px;">'
+f'<span style="font-size:15px; font-weight:800;">기부금 수령인: &nbsp;&nbsp; {org_name}[cite: 1]</span>'
+f'<div class="stamp-box" style="display:inline-block; width:65px; height:65px; border:1px dashed #94A3B8; vertical-align:middle; line-height:65px; text-align:center; font-size:10px; color:#64748B; margin-left:12px;">(인)[cite: 1]</div>'
 f'</div>'
+f'</div>'
+f'<div style="font-size:9px; color:#64748B; text-align:right; margin-top:8px;">'
+f'210mm×297mm[백상지 80g/㎡ 또는 중질지 80g/㎡][cite: 1]'
 f'</div>'
 f'</div>'
                         )
@@ -1278,26 +1375,54 @@ f'</div>'
             st.info(f"{current_year} 회계연도에 등록된 기부금 수입 내역이 없습니다.")
 
     # ==========================================
-    # TAB 4: ⚙️ 환경설정
+    # TAB 4: ⚙️ 환경설정 (단체정보 영구설정 섹션 신설)
     # ==========================================
     with tab_config:
         st.markdown(f"#### ⚙️ [{entity_label}] 기준정보 환경설정 및 관리")
-        st.caption("예산과목별 기부 용도 체계(대분류 / 소분류)를 등록·수정하고, 정기 약정자(교직원 등)를 관리합니다.")
+        st.caption("기부금 단체 발행처 정보, 예산과목별 기부 용도 체계 및 정기 약정자를 관리합니다.")
 
-        g_c1, g_c2 = st.columns(2)
+        # 3칸 버튼 그리드 전환
+        g_c1, g_c2, g_c3 = st.columns(3)
         with g_c1:
+            if st.button("🏛️ 기부금 단체 기본정보 설정", use_container_width=True, type="primary" if st.session_state.config_grid_menu == "ENTITY" else "secondary"):
+                st.session_state.config_grid_menu = "ENTITY"
+                st.rerun()
+        with g_c2:
             if st.button("🏷️ 기부 용도 분류 체계 관리", use_container_width=True, type="primary" if st.session_state.config_grid_menu == "PURPOSE" else "secondary"):
                 st.session_state.config_grid_menu = "PURPOSE"
                 st.rerun()
-        with g_c2:
+        with g_c3:
             if st.button("📅 정기 기부(약정)자 관리", use_container_width=True, type="primary" if st.session_state.config_grid_menu == "PLEDGE" else "secondary"):
                 st.session_state.config_grid_menu = "PLEDGE"
                 st.rerun()
 
         st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
 
-        # 1. 🏷️ 기부 용도 분류 체계 등록 및 수정
-        if st.session_state.config_grid_menu == "PURPOSE":
+        # ----------------------------------------------------
+        # 1. 🏛️ 기부금 단체 기본정보 설정 (영구 저장)
+        # ----------------------------------------------------
+        if st.session_state.config_grid_menu == "ENTITY":
+            st.markdown(f"##### 🏛️ [{entity_label}] 법정 영수증 발행 단체 정보 설정[cite: 1]")
+            st.caption("여기서 저장된 정보는 영수증 출력 시 단체명, 사업자번호, 소재지, 근거법령 및 수령인 서명란에 영구 연동됩니다.[cite: 1]")
+
+            with st.container(border=True):
+                info_c1, info_c2 = st.columns(2)
+                with info_c1:
+                    new_org_name = st.text_input("단체명 (영수증 수령인명)[cite: 1]", value=entity_data['org_name'], key="set_org_name")
+                    new_biz_no = st.text_input("사업자등록번호 (고유번호)[cite: 1]", value=entity_data['biz_no'], key="set_biz_no")
+                with info_c2:
+                    new_addr = st.text_input("단체 소재지 (주소)[cite: 1]", value=entity_data['address'], key="set_org_addr")
+                    new_law = st.text_input("기부금공제대상 근거법령[cite: 1]", value=entity_data['law_basis'], key="set_org_law")
+
+                if st.button("💾 기부금 단체 정보 영구 저장", type="primary", use_container_width=True):
+                    update_entity_info(current_entity, new_org_name.strip(), new_biz_no.strip(), new_addr.strip(), new_law.strip())
+                    st.success(f"[{entity_label}] 단체 정보가 안전하게 영구 저장되었습니다!")
+                    st.rerun()
+
+        # ----------------------------------------------------
+        # 2. 🏷️ 기부 용도 분류 체계 등록 및 수정
+        # ----------------------------------------------------
+        elif st.session_state.config_grid_menu == "PURPOSE":
             st.markdown("##### 🏷️ 기부 용도 분류 체계 등록 및 수정")
 
             conn = get_db_connection()
@@ -1432,7 +1557,9 @@ f'</div>'
                         st.success("해당 용도 분류가 삭제되었습니다.")
                         st.rerun()
 
-        # 2. 📅 정기 기부(약정)자 관리
+        # ----------------------------------------------------
+        # 3. 📅 정기 기부(약정)자 관리
+        # ----------------------------------------------------
         else:
             st.markdown(f"##### 📅 [{entity_label}] 정기 기부(약정)자 명단 등록 및 당월 수입 일괄 생성")
             
@@ -1447,7 +1574,7 @@ f'</div>'
                 with pl_col3:
                     pl_name = st.text_input("기부자명 (성명/법인명)", placeholder="예: 김교수, 이직원", key="pl_name_reg")
                 with pl_col4:
-                    pl_raw_id = st.text_input("주민등록번호 / 사업자번호", placeholder="예: 850315-1234567", type="password", help="마스킹 및 암호화 보관됩니다.", key="pl_id_reg")
+                    pl_raw_id = st.text_input("주민등록번호 / 사업자번호", placeholder="예: 850315-1234567", type="password", help="마스킹 및 보관됩니다.", key="pl_id_reg")
 
                 st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
                 st.markdown("##### 2. 약정 금액 및 분납 조건")
@@ -1512,7 +1639,7 @@ f'</div>'
                             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             current_entity, pl_cat, pl_meth, pl_name.strip(),
-                            mask_id_number(pl_raw_id), simple_encrypt(pl_raw_id),
+                            mask_id_number(pl_raw_id), pl_raw_id.strip(),
                             float(pl_tot), int(pl_cnt), float(pl_month),
                             pl_final_purpose.strip() or "일반", pl_status, now_str
                         ))
@@ -1598,13 +1725,13 @@ f'</div>'
                                     entity_type, fiscal_year, donation_date, budget_subject, purpose,
                                     donor_main_type, donor_sub_type, donor_name,
                                     id_number_masked, id_number_cipher, donation_type,
-                                    code, amount, receipt_no, receipt_date, is_statutory_transfer, created_at
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    code, amount, receipt_no, receipt_date, donor_address, is_statutory_transfer, created_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, (
                                 current_entity, current_year, str(batch_date), batch_budget, row['default_purpose'],
                                 d_main, d_sub, row['donor_name'],
                                 row['id_number_masked'], row['id_number_cipher'], "금전",
-                                "10", float(row['monthly_amt']), "미발급", str(batch_date), is_stat_val, now_str
+                                "10", float(row['monthly_amt']), "미발급", str(batch_date), "", is_stat_val, now_str
                             ))
                             created_count += 1
 
