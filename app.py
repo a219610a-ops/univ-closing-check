@@ -1269,7 +1269,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     st.success("발급번호가 저장되었습니다!")
                     st.rerun()
 
-            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (리스트 왜곡 방지 및 금전 기부 내용 공란 완벽 적용)
+            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (중간 합계 행 제거 및 금전 기부 시 내용 공란 정밀 구현)
             with right_col:
                 st.markdown("##### 2. 기부금 영수증 법정 서식 뷰어")
                 
@@ -1333,12 +1333,11 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                         curr_addr = first_item['donor_address'] if first_item['donor_address'] else "-"
                         rep_rec_no = first_item['receipt_no']
 
-                        # [요청 반영] 금전일 경우 내용란 공란 처리, 현물일 경우 품명·수량·단가 정상 반영
+                        # [요청 반영] 금전 기부 시 품명, 내용, 수량, 단가 완전히 공란 처리 (중간 합계 행 제거)
                         donation_rows_html = ""
                         for _, d_row in group_df.iterrows():
                             is_goods = (d_row["donation_type"] == "현물")
                             item_name_val = d_row["goods_name"] if (is_goods and 'goods_name' in d_row and d_row["goods_name"]) else "&nbsp;"
-                            # 금전 기부일 경우 내용란이 비어있도록 공란 처리
                             item_desc_val = d_row["purpose"] if is_goods else "&nbsp;"
                             item_qty_val = d_row["goods_qty"] if (is_goods and 'goods_qty' in d_row and d_row["goods_qty"]) else "&nbsp;"
                             item_price_val = d_row["goods_unit_price"] if (is_goods and 'goods_unit_price' in d_row and d_row["goods_unit_price"]) else "&nbsp;"
@@ -1440,12 +1439,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         <tr>
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">품명</th>
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">내용</th>
-        </tr>
-        <tr>
-            <th colspan="3" style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">합 계 금 액</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">수량</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">단가</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">금액</th>
         </tr>
         {donation_rows_html}
         <tr>
@@ -2391,8 +2384,6 @@ elif st.session_state.current_page == "AUDIT":
             "매칭유형": st.column_config.TextColumn("유형", width=75, disabled=True)
         }
     )
-    if st.button("💾 표에서 변경한 매칭 일괄 영구 저장", type="previous", use_container_width=True): # fixed
-        pass
     if st.button("💾 표에서 변경한 매칭 일괄 영구 저장", type="primary", use_container_width=True):
         b_save = {}
         for _, row in edited_df.iterrows():
