@@ -292,10 +292,6 @@ def init_db():
             VALUES ('FOUNDATION', '학교법인 OO학원', '123-82-99999', '경상북도 영천시 대학로 123', '「법인세법」 제24조제2항제1호라목', ?)
         """, (now_str,))
 
-    # 요청 반영: 대학 기부금 수입 및 연계 지출 전체 삭제
-    cursor.execute("DELETE FROM donation_expenses WHERE entity_type = 'UNIVERSITY'")
-    cursor.execute("DELETE FROM donation_receipts WHERE entity_type = 'UNIVERSITY'")
-
     conn.commit()
     conn.close()
 
