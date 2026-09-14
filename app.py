@@ -318,10 +318,6 @@ def init_db():
             VALUES ('FOUNDATION', '학교법인 OO학원', '123-82-99999', '경상북도 영천시 대학로 123', '「법인세법」 제24조제2항제1호라목', ?)
         """, (now_str,))
 
-    # 대학 기부금 수입 전체 초기화
-    cursor.execute("DELETE FROM donation_expenses WHERE entity_type = 'UNIVERSITY'")
-    cursor.execute("DELETE FROM donation_receipts WHERE entity_type = 'UNIVERSITY'")
-
     conn.commit()
     conn.close()
 
@@ -1015,7 +1011,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             st.markdown(f"""
             <div class="sub-box">
                 <b>선택된 기부금:</b> {target_action_row['기부자명']} 님 (발급번호: {target_action_row['발급번호']} / 사용용도: {target_action_row['사용용도']})<br>
-                <b>기부 원본액:</b> {target_action_row[' 기부수입액']:,} 원 &nbsp;|&nbsp; 
+                <b>기부 원본액:</b> {target_action_row['기부수입액']:,} 원 &nbsp;|&nbsp; 
                 <b>현재 남은 집행 잔액:</b> <span style="color:#059669; font-weight:700;">{curr_rem_amt:,} 원</span>
             </div>
             """, unsafe_allow_html=True)
@@ -1272,7 +1268,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     st.success("발급번호가 저장되었습니다!")
                     st.rerun()
 
-            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (중간 합계 행 제거 및 금전 기부 시 단일 행 1줄 처리 완벽 구현)
+            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (금전 기부 시 1줄 단일 행 출력 및 중간 합계 행 완전 제거)
             with right_col:
                 st.markdown("##### 2. 기부금 영수증 법정 서식 뷰어")
                 
@@ -1336,7 +1332,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                         curr_addr = first_item['donor_address'] if first_item['donor_address'] else "-"
                         rep_rec_no = first_item['receipt_no']
 
-                        # [요청 반영] 금전 기부 시 단일 행 1줄 출력 및 내용란 완전 공란 처리 (현물일 때만 품명/수량/단가 2단 행 적용)
+                        # [요청 반영] 금전 기부 시 중간 합계 행 없는 1줄 단일 행 구현 (품명, 내용, 수량, 단가 완전 공란)
                         donation_rows_html = ""
                         for _, d_row in group_df.iterrows():
                             is_goods = (d_row["donation_type"] == "현물")
@@ -1363,7 +1359,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                                     f'</tr>'
                                 )
                             else:
-                                # 금전 기부 시 단일 행 1줄 완벽 구현 (품명, 내용, 수량, 단가 모두 완전 공란)
                                 donation_rows_html += (
                                     f'<tr>'
                                     f'<td style="border:1px solid #000; padding:6px; text-align:center; vertical-align:middle;">{d_row["code"]}</td>'
@@ -1457,12 +1452,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">품명</th>
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">내용</th>
         </tr>
-        <tr>
-            <th colspan="3" style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">합 계 금 액</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">수량</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">단가</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">금액</th>
-        </tr>
         {donation_rows_html}
         <tr>
             <th colspan="5" style="border:1px solid #000; background:#FFF; padding:6px; font-weight:700; text-align:center; vertical-align:middle;">합 계 금 액</th>
@@ -1536,7 +1525,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             st.download_button(
                 label=f"📥 [{current_year}년] 기부자별 발급명세서 (.xlsx) 다운로드",
                 data=buf_donor,
-                file_name=f"기부자별발급명세서_{current_entity}_{current_year}년.xlsx",
+                file_name=f"기v부자별발급명세서_{current_entity}_{current_year}년.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
                 use_container_width=True
