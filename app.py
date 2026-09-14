@@ -198,40 +198,49 @@ def init_db():
         )
     """)
 
-    # 5) 기부 용도 분류 체계 테이블 (대분류 / 소분류)
+    # 5) 기부 용도 분류 체계 테이블 (예산과목 / 대분류 / 소분류)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS donation_purposes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             entity_type TEXT NOT NULL,
+            budget_subject TEXT NOT NULL DEFAULT '일반기부금',
             major_category TEXT NOT NULL,
             sub_category TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            UNIQUE(entity_type, major_category, sub_category)
+            created_at TEXT NOT NULL
         )
     """)
+
+    # 마이그레이션: donation_purposes에 budget_subject 열 확인
+    cursor.execute("PRAGMA table_info(donation_purposes)")
+    p_cols = [c[1] for c in cursor.fetchall()]
+    if "budget_subject" not in p_cols:
+        try:
+            cursor.execute("ALTER TABLE donation_purposes ADD COLUMN budget_subject TEXT DEFAULT '일반기부금'")
+        except Exception:
+            pass
 
     # 기본 용도 분류 데이터 초기 세팅 (최초 1회)
     cursor.execute("SELECT COUNT(*) FROM donation_purposes")
     if cursor.fetchone()[0] == 0:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         defaults = [
-            ("UNIVERSITY", "대학발전기금", "일반발전", now_str),
-            ("UNIVERSITY", "대학발전기금", "교육시설확충", now_str),
-            ("UNIVERSITY", "장학기금", "가계곤란장학", now_str),
-            ("UNIVERSITY", "장학기금", "성적우수장학", now_str),
-            ("UNIVERSITY", "학과발전기금", "기계공학과", now_str),
-            ("UNIVERSITY", "학과발전기금", "간호학과", now_str),
-            ("UNIVERSITY", "특수목적기금", "학술연구지원", now_str),
-            ("FOUNDATION", "발전기금", "법인발전기금", now_str),
-            ("FOUNDATION", "지정기부금", "법정부담금", now_str),
-            ("FOUNDATION", "지정기부금", "수익사업지원", now_str)
+            ("UNIVERSITY", "일반기부금", "대학발전기금", "일반발전", now_str),
+            ("UNIVERSITY", "일반기부금", "대학발전기금", "교육시설확충", now_str),
+            ("UNIVERSITY", "지정기부금", "장학기금", "가계곤란장학", now_str),
+            ("UNIVERSITY", "지정기부금", "장학기금", "성적우수장학", now_str),
+            ("UNIVERSITY", "지정기부금", "학과발전기금", "기계공학과", now_str),
+            ("UNIVERSITY", "지정기부금", "학과발전기금", "간호학과", now_str),
+            ("UNIVERSITY", "현물기부금", "교육기자재", "실습기자재기증", now_str),
+            ("FOUNDATION", "일반기부금", "발전기금", "법인발전기금", now_str),
+            ("FOUNDATION", "지정기부금", "법정부담금", "법정부담금", now_str),
+            ("FOUNDATION", "지정기부금", "수익사업", "수익사업지원", now_str)
         ]
         cursor.executemany("""
-            INSERT OR IGNORE INTO donation_purposes (entity_type, major_category, sub_category, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO donation_purposes (entity_type, budget_subject, major_category, sub_category, created_at)
+            VALUES (?, ?, ?, ?, ?)
         """, defaults)
 
-    # 구버전 DB 마이그레이션
+    # receipts / expenses 컬럼 점검
     cursor.execute("PRAGMA table_info(donation_receipts)")
     r_cols = [c[1] for c in cursor.fetchall()]
     current_y = datetime.now().year
@@ -343,21 +352,25 @@ def delete_donation_receipt(receipt_id):
     finally:
         conn.close()
 
-def get_purposes_dict(entity_type):
+# 3단계 계층 용도 데이터 로드 함수: {budget_subject: {major_category: [sub_categories]}}
+def get_hierarchical_purposes(entity_type):
     conn = get_db_connection()
     df = pd.read_sql_query("""
-        SELECT major_category, sub_category FROM donation_purposes 
-        WHERE entity_type = ? ORDER BY major_category, sub_category
+        SELECT budget_subject, major_category, sub_category FROM donation_purposes 
+        WHERE entity_type = ? ORDER BY budget_subject, major_category, sub_category
     """, conn, params=(entity_type,))
     conn.close()
-    p_dict = {}
+    
+    tree = {"일반기부금": {}, "지정기부금": {}, "현물기부금": {}}
     for _, row in df.iterrows():
+        b_sub = row['budget_subject'] if row['budget_subject'] in tree else "일반기부금"
         maj = row['major_category']
         sub = row['sub_category']
-        if maj not in p_dict:
-            p_dict[maj] = []
-        p_dict[maj].append(sub)
-    return p_dict
+        if maj not in tree[b_sub]:
+            tree[b_sub][maj] = []
+        if sub not in tree[b_sub][maj]:
+            tree[b_sub][maj].append(sub)
+    return tree
 
 # ==========================================
 # 3. 글로벌 세션 상태 및 상단 미니 메뉴바
@@ -437,7 +450,7 @@ if st.session_state.current_page == "HOME":
             st.caption("대학 및 법인 기부금 수입·정기약정·원천별 지출·발급명세 통합 관리")
             st.markdown("""
             * **회계연도별 독립 관리** (2026, 2025 등 연도별 분리 정산)
-            * **사용자 정의 기부 용도 체계 관리** (대분류 / 소분류 직접 등록·수정·삭제)
+            * **3단계 기부 용도 체계 관리** (예산과목 ➔ 대분류 ➔ 소분류 직접 등록·수정·삭제)
             * 교직원 급여공제 및 정기 약정자 관리 & 1클릭 당월 수입 일괄 채번
             * 수입 건 수정·삭제 관리 및 실시간 수입 합계 확인
             * 국세청 법정 기부금영수증 & 용도별 집행 정산표 엑셀 다운로드
@@ -466,7 +479,7 @@ elif st.session_state.current_page == "DONATION_SELECT":
             st.markdown("""
             * 회계연도별(3월~익년 2월) 기부금 수입 및 학생 장학/학과 지출 관리
             * 교직원 급여공제 정기기부 약정자 명단 등록 및 매월 일괄 수입 자동 채번
-            * 사용자 지정 대학발전기금, 장학기금, 학과발전기금 용도 분류 연동
+            * 예산과목 ➔ 대분류 ➔ 소분류 계층형 용도 분류 연동
             * 수입 등록·수정·삭제 관리 및 수입 합계 실시간 결산
             * 국세청 법정 영수증(코드 10) 및 용도별 정산표 엑셀 다운로드
             """)
@@ -485,7 +498,7 @@ elif st.session_state.current_page == "DONATION_SELECT":
             st.caption("학교법인으로 접수된 기부금 및 법정부담금 전출 특화 관리")
             st.markdown("""
             * 회계연도별(3월~익년 2월) 법인 발전기금 및 법인 지정기부금 독립 관리
-            * 법인 전용 용도 분류 체계 관리 (발전기금, 법정부담금, 수익사업지원 등)
+            * 법인 전용 3단계 용도 분류 체계 관리 (발전기금, 법정부담금, 수익사업지원 등)
             * **법정부담금 전출용** 기부금 수입 및 학교 전출 지출 매핑 관리
             * 법인 세무 신고용 영수증 및 발급명세서 생성
             """)
@@ -559,7 +572,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
     """, conn, params=(current_entity,))
     conn.close()
 
-    purposes_dict = get_purposes_dict(current_entity)
+    purpose_tree = get_hierarchical_purposes(current_entity)
 
     total_income = receipts_df['amount'].sum() if not receipts_df.empty else 0.0
     total_expense = expenses_df['amount'].sum() if not expenses_df.empty else 0.0
@@ -585,7 +598,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
 
     st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
 
-    # 4개 독립 탭 (간결한 명칭 적용)
+    # 4개 독립 탭
     tab_manage, tab_stmt, tab_official, tab_config = st.tabs([
         "📥 기부금 수입·수정·삭제 및 지출 관리", 
         "📊 사용 용도별 집행 정산표",
@@ -631,8 +644,8 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
 
             st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
-            # 2단계: 기부 내역 및 회계 분류
-            st.markdown("##### 2. 기부 내역 및 회계 분류")
+            # 2단계: 기부 내역 및 회계 분류 (1행: 일자/금액, 2행: 예산과목 ➔ 대분류 ➔ 소분류, 3행: 구분코드/내용구분)
+            st.markdown("##### 2. 기부 내역 및 회계 분류 (예산과목 ➔ 대분류 ➔ 소분류)")
             
             row2_1_c1, row2_1_c2 = st.columns(2)
             with row2_1_c1:
@@ -644,55 +657,56 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                 d_amt = parse_money(d_amt_input)
                 st.caption(f"✓ 실제 인식 금액: **{d_amt:,} 원**")
 
-            row2_2_c1, row2_2_c2, row2_2_c3, row2_2_c4 = st.columns([1.5, 3.5, 1.2, 1.4])
-            with row2_2_c1:
+            # 2행: 예산과목 ➔ 대분류 ➔ 소분류 순차 연동
+            h_c1, h_c2, h_c3 = st.columns([1.5, 2, 2.5])
+            with h_c1:
                 b_opts = ["일반기부금", "지정기부금", "현물기부금"]
                 def_b_idx = b_opts.index(edit_row['budget_subject']) if is_edit_mode and edit_row['budget_subject'] in b_opts else 0
                 budget_subj = st.selectbox("예산과목", b_opts, index=def_b_idx, key=f"bs_{current_year}_{is_edit_mode}")
 
-            with row2_2_c2:
-                major_keys = list(purposes_dict.keys())
-                if current_entity == "UNIVERSITY":
-                    if budget_subj == "일반기부금":
-                        maj_sel = "대학발전기금" if "대학발전기금" in major_keys else (major_keys[0] if major_keys else "기본")
-                        sub_candidates = purposes_dict.get(maj_sel, ["일반발전"])
-                        sub_sel = st.selectbox("사용 세부 용도", sub_candidates, key=f"u_sub_gen_{is_edit_mode}")
-                        final_purpose = f"{maj_sel} - {sub_sel}" if sub_sel else maj_sel
+            maj_map = purpose_tree.get(budget_subj, {})
+            avail_majors = list(maj_map.keys())
+            if not avail_majors:
+                avail_majors = ["기본"]
+
+            with h_c2:
+                maj_idx = 0
+                if is_edit_mode:
+                    for idx, m_name in enumerate(avail_majors):
+                        if m_name in edit_row['purpose']:
+                            maj_idx = idx
+                            break
+                chosen_maj = st.selectbox("대분류", avail_majors, index=maj_idx, key=f"hier_maj_{budget_subj}_{is_edit_mode}")
+
+            with h_c3:
+                sub_candidates = maj_map.get(chosen_maj, []) + ["기타(직접입력)"]
+                sub_idx = 0
+                if is_edit_mode:
+                    for idx, s_name in enumerate(sub_candidates):
+                        if s_name != "기타(직접입력)" and s_name in edit_row['purpose']:
+                            sub_idx = idx
+                            break
                     else:
-                        avail_maj = [k for k in major_keys if k != "대학발전기금"] or major_keys
-                        maj_sel = st.selectbox("대분류", avail_maj, key=f"u_maj_des_{is_edit_mode}")
-                        sub_candidates = purposes_dict.get(maj_sel, []) + ["기타(직접입력)"]
-                        sub_sel = st.selectbox("소분류", sub_candidates, key=f"u_sub_des_{is_edit_mode}")
-                        if sub_sel == "기타(직접입력)":
-                            def_u_custom = edit_row['purpose'] if is_edit_mode else ""
-                            final_purpose = st.text_input("상세 용도 직접 입력", value=def_u_custom, placeholder="예: 신설학과 발전기금", key=f"u_custom_purp_{is_edit_mode}")
-                        else:
-                            final_purpose = f"{maj_sel} - {sub_sel}" if sub_sel else maj_sel
+                        if edit_row['purpose']:
+                            sub_idx = len(sub_candidates) - 1
+
+                chosen_sub = st.selectbox("소분류", sub_candidates, index=sub_idx, key=f"hier_sub_{chosen_maj}_{is_edit_mode}")
+                if chosen_sub == "기타(직접입력)":
+                    def_custom_val = edit_row['purpose'] if is_edit_mode else ""
+                    custom_sub_text = st.text_input("상세 소분류 직접 입력", value=def_custom_val, placeholder="예: 상세 목적 또는 기부내역", key=f"cust_sub_{is_edit_mode}")
+                    final_purpose = f"{chosen_maj} - {custom_sub_text.strip()}" if custom_sub_text.strip() else chosen_maj
                 else:
-                    if budget_subj == "일반기부금":
-                        maj_sel = "발전기금" if "발전기금" in major_keys else (major_keys[0] if major_keys else "발전기금")
-                        sub_candidates = purposes_dict.get(maj_sel, ["법인발전기금"])
-                        sub_sel = st.selectbox("사용 세부 용도", sub_candidates, key=f"f_sub_gen_{is_edit_mode}")
-                        final_purpose = f"{maj_sel} - {sub_sel}" if sub_sel else maj_sel
-                    else:
-                        avail_maj = [k for k in major_keys if k != "발전기금"] or major_keys
-                        maj_sel = st.selectbox("대분류", avail_maj, key=f"f_maj_des_{is_edit_mode}")
-                        sub_candidates = purposes_dict.get(maj_sel, []) + ["기타(직접입력)"]
-                        sub_sel = st.selectbox("소분류", sub_candidates, key=f"f_sub_des_{is_edit_mode}")
-                        if sub_sel == "기타(직접입력)":
-                            def_f_custom = edit_row['purpose'] if is_edit_mode else ""
-                            final_purpose = st.text_input("상세 용도 직접 입력", value=def_f_custom, placeholder="예: 지정 목적 사업", key=f"f_custom_purp_{is_edit_mode}")
-                        else:
-                            final_purpose = f"{maj_sel} - {sub_sel}" if sub_sel else maj_sel
+                    final_purpose = f"{chosen_maj} - {chosen_sub}"
 
-            with row2_2_c3:
+            # 3행: 구분 코드 및 기부 내용 구분
+            row2_3_c1, row2_3_c2 = st.columns(2)
+            with row2_3_c1:
                 def_code = edit_row['code'] if is_edit_mode else "10"
-                d_code = st.text_input("구분 코드", value=def_code, key=f"dc_{current_year}_{is_edit_mode}")
-
-            with row2_2_c4:
+                d_code = st.text_input("구분 코드 (법정 서식)", value=def_code, key=f"dc_{current_year}_{is_edit_mode}")
+            with row2_3_c2:
                 t_opts = ["금전", "현물"]
-                def_t_idx = t_opts.index(edit_row['donation_type']) if is_edit_mode and edit_row['donation_type'] in t_opts else 0
-                d_type = st.selectbox("내용 구분", t_opts, index=def_t_idx, key=f"dt_{current_year}_{is_edit_mode}")
+                def_t_idx = t_opts.index(edit_row['donation_type']) if is_edit_mode and edit_row['donation_type'] in t_opts else (1 if budget_subj == "현물기부금" else 0)
+                d_type = st.selectbox("내용 구분 (금전/현물)", t_opts, index=def_t_idx, key=f"dt_{current_year}_{is_edit_mode}")
 
             st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
@@ -1134,13 +1148,13 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                 st.info(f"{current_year}년도 발급명세서 데이터가 없습니다.")
 
     # ==========================================
-    # TAB 4: ⚙️ 환경설정 및 관리 (그리드 전환 & 대/소분류 정렬 & 수정 기능 완비)
+    # TAB 4: ⚙️ 환경설정 및 관리 (3단계 예산과목 ➔ 대분류 ➔ 소분류 관리)
     # ==========================================
     with tab_config:
         st.markdown(f"#### ⚙️ [{entity_label}] 기준정보 환경설정 및 관리")
-        st.caption("기부 용도 체계(대분류 / 소분류)를 등록·수정하고, 정기 약정자(교직원 급여공제 등)를 일괄 관리합니다.")
+        st.caption("예산과목별 기부 용도 체계(대분류 / 소분류)를 등록·수정하고, 정기 약정자(교직원 등)를 관리합니다.")
 
-        # 관리 대상 선택: 시각적 카드 그리드 형태 (버튼 2열)
+        # 카드 그리드 메뉴 버튼
         g_c1, g_c2 = st.columns(2)
         with g_c1:
             if st.button("🏷️ 기부 용도 분류 체계 관리", use_container_width=True, type="primary" if st.session_state.config_grid_menu == "PURPOSE" else "secondary"):
@@ -1154,20 +1168,18 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
 
         # ----------------------------------------------------
-        # 1. 🏷️ 기부 용도 분류 체계 관리 (대분류 / 소분류 정렬 및 수정 기능)
+        # 1. 🏷️ 기부 용도 분류 체계 관리 (최상위 예산과목 연동)
         # ----------------------------------------------------
         if st.session_state.config_grid_menu == "PURPOSE":
-            st.markdown("##### 🏷️ 기부 용도 분류 체계 (대분류 / 소분류) 등록 및 수정")
+            st.markdown("##### 🏷️ 기부 용도 분류 체계 등록 및 수정 (예산과목 ➔ 대분류 ➔ 소분류)")
 
-            # DB에서 현재 등록된 분류 데이터 조회
             conn = get_db_connection()
             purp_df = pd.read_sql_query("""
-                SELECT id, major_category, sub_category, created_at FROM donation_purposes
-                WHERE entity_type = ? ORDER BY major_category, sub_category
+                SELECT id, budget_subject, major_category, sub_category, created_at FROM donation_purposes
+                WHERE entity_type = ? ORDER BY budget_subject, major_category, sub_category
             """, conn, params=(current_entity,))
             conn.close()
 
-            # 수정 모드 데이터 로드
             edit_p_row = None
             if st.session_state.editing_purpose_id is not None:
                 matched_p = purp_df[purp_df['id'] == st.session_state.editing_purpose_id]
@@ -1177,17 +1189,20 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     st.session_state.editing_purpose_id = None
 
             is_edit_p_mode = (edit_p_row is not None)
-            p_expander_title = f"✏️ 용도 분류 항목 수정 중: [{edit_p_row['major_category']} ➔ {edit_p_row['sub_category']}]" if is_edit_p_mode else "➕ 새 용도 분류 항목 추가"
+            p_expander_title = f"✏️ 용도 분류 항목 수정 중: [{edit_p_row['budget_subject']} > {edit_p_row['major_category']} > {edit_p_row['sub_category']}]" if is_edit_p_mode else "➕ 새 용도 분류 항목 추가"
 
             with st.expander(p_expander_title, expanded=True):
-                existing_majors = list(purposes_dict.keys())
-                
+                b_opts_list = ["일반기부금", "지정기부금", "현물기부금"]
+
                 if is_edit_p_mode:
-                    st.info(f"💡 현재 **[{edit_p_row['major_category']} ➔ {edit_p_row['sub_category']}]** 항목을 수정 중입니다.")
-                    u_c1, u_c2 = st.columns(2)
-                    with u_c1:
+                    st.info(f"💡 현재 **[{edit_p_row['budget_subject']} > {edit_p_row['major_category']} > {edit_p_row['sub_category']}]** 항목을 수정 중입니다.")
+                    u_b1, u_b2, u_b3 = st.columns(3)
+                    with u_b1:
+                        def_b_idx = b_opts_list.index(edit_p_row['budget_subject']) if edit_p_row['budget_subject'] in b_opts_list else 0
+                        target_b = st.selectbox("최상위 예산과목", b_opts_list, index=def_b_idx, key="edit_purp_b")
+                    with u_b2:
                         target_maj = st.text_input("대분류 명칭", value=edit_p_row['major_category'], key="edit_purp_maj")
-                    with u_c2:
+                    with u_b3:
                         target_sub = st.text_input("소분류 명칭", value=edit_p_row['sub_category'], key="edit_purp_sub")
 
                     p_btn1, p_btn2 = st.columns([1.8, 8.2])
@@ -1196,19 +1211,15 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                             if target_maj.strip() and target_sub.strip():
                                 conn = get_db_connection()
                                 cursor = conn.cursor()
-                                try:
-                                    cursor.execute("""
-                                        UPDATE donation_purposes 
-                                        SET major_category = ?, sub_category = ?
-                                        WHERE id = ?
-                                    """, (target_maj.strip(), target_sub.strip(), int(edit_p_row['id'])))
-                                    conn.commit()
-                                    st.session_state.editing_purpose_id = None
-                                    st.success("수정되었습니다.")
-                                except sqlite3.IntegrityError:
-                                    st.warning("이미 존재하는 대분류/소분류 조합입니다.")
-                                finally:
-                                    conn.close()
+                                cursor.execute("""
+                                    UPDATE donation_purposes 
+                                    SET budget_subject = ?, major_category = ?, sub_category = ?
+                                    WHERE id = ?
+                                """, (target_b, target_maj.strip(), target_sub.strip(), int(edit_p_row['id'])))
+                                conn.commit()
+                                conn.close()
+                                st.session_state.editing_purpose_id = None
+                                st.success("수정되었습니다.")
                                 st.rerun()
                             else:
                                 st.warning("대분류와 소분류 명칭을 모두 입력해 주세요.")
@@ -1218,52 +1229,54 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                             st.rerun()
 
                 else:
-                    # 신규 등록 폼: 대분류 방식 선택 한 줄 배치 ➔ 대분류/소분류 1:1 수평 정렬
-                    maj_mode = st.radio("대분류 선택 방식", ["기존 대분류 선택", "새 대분류 직접입력"], horizontal=True, key="maj_mode_radio")
+                    # 신규 등록: 예산과목 선택 ➔ 대분류 선택방식 ➔ 대분류 / 소분류 1:1 정렬
+                    target_b = st.selectbox("1. 최상위 예산과목 선택", b_opts_list, key="add_new_budget_choice")
+                    
+                    sub_dict_for_b = purpose_tree.get(target_b, {})
+                    existing_majors_in_b = list(sub_dict_for_b.keys())
+
+                    maj_mode = st.radio("2. 대분류 선택 방식", ["기존 대분류 선택", "새 대분류 직접입력"], horizontal=True, key="maj_mode_hier")
                     
                     u_c1, u_c2 = st.columns(2)
                     with u_c1:
-                        if maj_mode == "기존 대분류 선택" and existing_majors:
-                            target_maj = st.selectbox("대분류", existing_majors, key="add_exist_maj")
+                        if maj_mode == "기존 대분류 선택" and existing_majors_in_b:
+                            target_maj = st.selectbox("대분류", existing_majors_in_b, key="add_exist_maj_hier")
                         else:
-                            target_maj = st.text_input("대분류", placeholder="예: 대학발전기금, 장학기금", key="add_new_maj")
+                            target_maj = st.text_input("대분류", placeholder="예: 대학발전기금, 장학기금", key="add_new_maj_hier")
                     with u_c2:
-                        target_sub = st.text_input("소분류", placeholder="예: 시설확충, 학과지정, 성적우수장학", key="add_new_sub")
+                        target_sub = st.text_input("소분류", placeholder="예: 시설확충, 학과발전, 성적우수장학", key="add_new_sub_hier")
 
                     if st.button("💾 용도 분류 추가", type="primary", use_container_width=True):
                         if target_maj.strip() and target_sub.strip():
                             conn = get_db_connection()
                             cursor = conn.cursor()
                             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            try:
-                                cursor.execute("""
-                                    INSERT INTO donation_purposes (entity_type, major_category, sub_category, created_at)
-                                    VALUES (?, ?, ?, ?)
-                                """, (current_entity, target_maj.strip(), target_sub.strip(), now_str))
-                                conn.commit()
-                                st.success(f"[{target_maj.strip()} > {target_sub.strip()}] 분류가 추가되었습니다.")
-                            except sqlite3.IntegrityError:
-                                st.warning("이미 존재하는 분류 항목입니다.")
-                            finally:
-                                conn.close()
+                            cursor.execute("""
+                                INSERT INTO donation_purposes (entity_type, budget_subject, major_category, sub_category, created_at)
+                                VALUES (?, ?, ?, ?, ?)
+                            """, (current_entity, target_b, target_maj.strip(), target_sub.strip(), now_str))
+                            conn.commit()
+                            conn.close()
+                            st.success(f"[{target_b} > {target_maj.strip()} > {target_sub.strip()}] 분류가 추가되었습니다.")
                             st.rerun()
                         else:
                             st.warning("대분류와 소분류를 모두 입력해 주세요.")
 
-            # 현재 등록된 분류 테이블 표시 및 수정/삭제 컨트롤
+            # 등록된 분류 테이블 표시 및 수정/삭제
             if not purp_df.empty:
                 disp_purp = purp_df.copy()
                 disp_purp['연번'] = range(1, len(disp_purp) + 1)
                 st.dataframe(
-                    disp_purp[['연번', 'major_category', 'sub_category', 'created_at']],
+                    disp_purp[['연번', 'budget_subject', 'major_category', 'sub_category', 'created_at']],
                     use_container_width=True,
                     height=240,
                     hide_index=True,
                     column_config={
                         "연번": st.column_config.NumberColumn("연번", width=60),
-                        "major_category": st.column_config.TextColumn("대분류", width=180),
-                        "sub_category": st.column_config.TextColumn("소분류", width=220),
-                        "created_at": st.column_config.TextColumn("등록일시", width=160)
+                        "budget_subject": st.column_config.TextColumn("예산과목", width=120),
+                        "major_category": st.column_config.TextColumn("대분류", width=160),
+                        "sub_category": st.column_config.TextColumn("소분류", width=200),
+                        "created_at": st.column_config.TextColumn("등록일시", width=150)
                     }
                 )
 
@@ -1272,7 +1285,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     sel_p_id = st.selectbox(
                         "관리할 분류 항목 선택",
                         purp_df['id'].tolist(),
-                        format_func=lambda x: f"[{purp_df[purp_df['id']==x]['major_category'].values[0]}] ➔ {purp_df[purp_df['id']==x]['sub_category'].values[0]}",
+                        format_func=lambda x: f"[{purp_df[purp_df['id']==x]['budget_subject'].values[0]}] {purp_df[purp_df['id']==x]['major_category'].values[0]} ➔ {purp_df[purp_df['id']==x]['sub_category'].values[0]}",
                         key="sel_purp_manage"
                     )
                 with del_c2:
@@ -1334,9 +1347,10 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                 pl_st1, pl_st2 = st.columns([2, 1])
                 with pl_st1:
                     all_sub_options = []
-                    for maj_k, sub_list in purposes_dict.items():
-                        for s_item in sub_list:
-                            all_sub_options.append(f"{maj_k} - {s_item}")
+                    for b_name, majs in purpose_tree.items():
+                        for m_name, subs in majs.items():
+                            for s_item in subs:
+                                all_sub_options.append(f"[{b_name}] {m_name} - {s_item}")
                     if not all_sub_options:
                         all_sub_options = ["대학발전기금" if current_entity == "UNIVERSITY" else "발전기금"]
                     all_sub_options.append("기타(직접입력)")
