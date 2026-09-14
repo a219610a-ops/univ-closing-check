@@ -975,7 +975,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                 }
             )
 
-            # 수입대장 엑셀 다운로드 버튼 추가
             buf_ledger = io.BytesIO()
             with pd.ExcelWriter(buf_ledger, engine='openpyxl') as writer:
                 summary_table_df.drop(columns=['수입ID']).to_excel(writer, index=False, sheet_name=f"{current_year}년_기부금수입대장")
@@ -1291,7 +1290,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     st.success("발급번호가 저장되었습니다!")
                     st.rerun()
 
-            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (공식 헤더 3단 구조 반영: 품명/수량/단가 완벽 지원)
+            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (현물 품명/수량/단가 및 금전 1줄 단일 행 완벽 구현)
             with right_col:
                 st.markdown("##### 2. 기부금 영수증 법정 서식 뷰어")
                 
@@ -1355,7 +1354,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                         curr_addr = first_item['donor_address'] if first_item['donor_address'] else "-"
                         rep_rec_no = first_item['receipt_no']
 
-                        # [요청 반영] 현물일 때 품명, 내용(목적), 수량, 단가가 2단 행으로 정확히 매핑되도록 구현 (금전일 경우 1줄 단일 행 및 공란)
                         donation_rows_html = ""
                         for _, d_row in group_df.iterrows():
                             is_goods = (d_row["donation_type"] == "현물")
