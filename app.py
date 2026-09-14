@@ -184,6 +184,9 @@ def init_db():
             receipt_no TEXT NOT NULL,
             receipt_date TEXT NOT NULL,
             donor_address TEXT DEFAULT '',
+            goods_name TEXT DEFAULT '',
+            goods_qty TEXT DEFAULT '',
+            goods_unit_price TEXT DEFAULT '',
             is_statutory_transfer INTEGER DEFAULT 0,
             created_at TEXT NOT NULL
         )
@@ -217,7 +220,9 @@ def init_db():
             total_pledge_amt REAL DEFAULT 0,
             installment_count INTEGER DEFAULT 0,
             monthly_amt REAL NOT NULL,
-            default_purpose TEXT NOT NULL,
+            budget_subject TEXT NOT NULL DEFAULT '일반기부금',
+            major_category TEXT NOT NULL DEFAULT '',
+            sub_category TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT '진행중',
             created_at TEXT NOT NULL
         )
@@ -249,6 +254,27 @@ def init_db():
     r_cols = [c[1] for c in cursor.fetchall()]
     if "donor_address" not in r_cols:
         try: cursor.execute("ALTER TABLE donation_receipts ADD COLUMN donor_address TEXT DEFAULT ''")
+        except Exception: pass
+    if "goods_name" not in r_cols:
+        try: cursor.execute("ALTER TABLE donation_receipts ADD COLUMN goods_name TEXT DEFAULT ''")
+        except Exception: pass
+    if "goods_qty" not in r_cols:
+        try: cursor.execute("ALTER TABLE donation_receipts ADD COLUMN goods_qty TEXT DEFAULT ''")
+        except Exception: pass
+    if "goods_unit_price" not in r_cols:
+        try: cursor.execute("ALTER TABLE donation_receipts ADD COLUMN goods_unit_price TEXT DEFAULT ''")
+        except Exception: pass
+
+    cursor.execute("PRAGMA table_info(donation_pledges)")
+    pl_cols = [c[1] for c in cursor.fetchall()]
+    if "budget_subject" not in pl_cols:
+        try: cursor.execute("ALTER TABLE donation_pledges ADD COLUMN budget_subject TEXT DEFAULT '일반기부금'")
+        except Exception: pass
+    if "major_category" not in pl_cols:
+        try: cursor.execute("ALTER TABLE donation_pledges ADD COLUMN major_category TEXT DEFAULT ''")
+        except Exception: pass
+    if "sub_category" not in pl_cols:
+        try: cursor.execute("ALTER TABLE donation_pledges ADD COLUMN sub_category TEXT DEFAULT ''")
         except Exception: pass
 
     cursor.execute("PRAGMA table_info(donation_purposes)")
@@ -291,6 +317,10 @@ def init_db():
             INSERT INTO entity_info (entity_type, org_name, biz_no, address, law_basis, updated_at)
             VALUES ('FOUNDATION', '학교법인 OO학원', '123-82-99999', '경상북도 영천시 대학로 123', '「법인세법」 제24조제2항제1호라목', ?)
         """, (now_str,))
+
+    # 대학 기부금 수입 전체 초기화
+    cursor.execute("DELETE FROM donation_expenses WHERE entity_type = 'UNIVERSITY'")
+    cursor.execute("DELETE FROM donation_receipts WHERE entity_type = 'UNIVERSITY'")
 
     conn.commit()
     conn.close()
@@ -653,7 +683,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
     ])
 
     # ==========================================
-    # TAB 1: 📥 기부금 관리
+    # TAB 1: 📥 기부금 관리 (현물 품명/수량/단가 입력 지원)
     # ==========================================
     with tab_manage:
         edit_row = None
@@ -755,6 +785,20 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                 def_t_idx = t_opts.index(edit_row['donation_type']) if is_edit_mode and edit_row['donation_type'] in t_opts else (1 if budget_subj == "현물기부금" else 0)
                 d_type = st.selectbox("내용 구분 (금전/현물)", t_opts, index=def_t_idx, key=f"dt_{current_year}_{is_edit_mode}")
 
+            # [요청 반영] 현물 기부 시 품명, 수량, 단가 추가 입력 필드 활성화
+            goods_name_input = ""
+            goods_qty_input = ""
+            goods_price_input = ""
+            if d_type == "현물":
+                st.markdown("##### 3. 현물 상세 기재 사항 (법정 서식 반영)")
+                g_col1, g_col2, g_col3 = st.columns(3)
+                with g_col1:
+                    goods_name_input = st.text_input("품명", value=edit_row['goods_name'] if is_edit_mode and 'goods_name' in edit_row else "", placeholder="예: 실습용 PC", key=f"g_name_{current_year}_{is_edit_mode}")
+                with g_col2:
+                    goods_qty_input = st.text_input("수량", value=edit_row['goods_qty'] if is_edit_mode and 'goods_qty' in edit_row else "", placeholder="예: 5", key=f"g_qty_{current_year}_{is_edit_mode}")
+                with g_col3:
+                    goods_price_input = st.text_input("단가", value=edit_row['goods_unit_price'] if is_edit_mode and 'goods_unit_price' in edit_row else "", placeholder="예: 1,000,000", key=f"g_price_{current_year}_{is_edit_mode}")
+
             is_stat_chk = 0
             if current_entity == "FOUNDATION":
                 default_checked = True if (is_edit_mode and edit_row['is_statutory_transfer'] == 1) or ("법정부담금" in final_purpose) else False
@@ -788,13 +832,15 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                                 donation_date = ?, budget_subject = ?, purpose = ?,
                                 donor_main_type = ?, donor_sub_type = ?, donor_name = ?,
                                 id_number_masked = ?, id_number_cipher = ?, donation_type = ?,
-                                code = ?, amount = ?, receipt_date = ?, is_statutory_transfer = ?
+                                code = ?, amount = ?, receipt_date = ?, 
+                                goods_name = ?, goods_qty = ?, goods_unit_price = ?, is_statutory_transfer = ?
                             WHERE id = ?
                         """, (
                             str(d_date), budget_subj, final_purpose.strip() or "일반",
                             d_main_type, d_sub_type, donor_name.strip(),
                             masked_id, stored_cipher_id, d_type,
-                            d_code.strip(), float(d_amt), str(d_date), is_stat_chk,
+                            d_code.strip(), float(d_amt), str(d_date),
+                            goods_name_input.strip(), goods_qty_input.strip(), goods_price_input.strip(), is_stat_chk,
                             int(edit_row['id'])
                         ))
                         cursor.execute("UPDATE donation_expenses SET donor_name = ? WHERE receipt_id = ?", (donor_name.strip(), int(edit_row['id'])))
@@ -809,13 +855,15 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                                 entity_type, fiscal_year, donation_date, budget_subject, purpose,
                                 donor_main_type, donor_sub_type, donor_name,
                                 id_number_masked, id_number_cipher, donation_type,
-                                code, amount, receipt_no, receipt_date, donor_address, is_statutory_transfer, created_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                code, amount, receipt_no, receipt_date, donor_address, 
+                                goods_name, goods_qty, goods_unit_price, is_statutory_transfer, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             current_entity, current_year, str(d_date), budget_subj, final_purpose.strip() or "일반",
                             d_main_type, d_sub_type, donor_name.strip(),
                             masked_id, stored_cipher_id, d_type,
-                            d_code.strip(), float(d_amt), assigned_rec_no, str(d_date), existing_addr, is_stat_chk, now_str
+                            d_code.strip(), float(d_amt), assigned_rec_no, str(d_date), existing_addr,
+                            goods_name_input.strip(), goods_qty_input.strip(), goods_price_input.strip(), is_stat_chk, now_str
                         ))
                         new_receipt_id = cursor.lastrowid
                         conn.commit()
@@ -1094,7 +1142,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         )
 
     # ==========================================
-    # TAB 3: 📑 기부영수증 발급
+    # TAB 3: 📑 기부영수증 발급 (성명 중앙정렬 및 금액칸 통폐합 반영)
     # ==========================================
     with tab_official:
         st.markdown(f"#### 📑 [{current_year} 회계연도] 기부영수증 발급 (법인세법 시행규칙 별지 제63호의3서식)")
@@ -1224,7 +1272,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     st.success("발급번호가 저장되었습니다!")
                     st.rerun()
 
-            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (6열 단일 그리드 보정)
+            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (중앙정렬 및 금액 통폐합 반영)
             with right_col:
                 st.markdown("##### 2. 기부금 영수증 법정 서식 뷰어")
                 
@@ -1257,8 +1305,8 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
     .receipt-header { text-align: center; border-bottom: 1.5px solid #000; padding-bottom: 8px; margin-bottom: 12px; }
     .receipt-title { font-size: 22px; font-weight: 800; letter-spacing: 5px; }
     .receipt-table { width: 100%; border-collapse: collapse; margin-bottom: 10px; font-size: 11px; background: #FFF; table-layout: fixed; }
-    .receipt-table th, .receipt-table td { border: 1px solid #000; padding: 5px 6px; background: #FFF; word-break: break-all; }
-    .receipt-table th { text-align: center; font-weight: 600; }
+    .receipt-table th, .receipt-table td { border: 1px solid #000; padding: 5px 6px; background: #FFF; word-break: break-all; text-align: center; }
+    .receipt-table th { font-weight: 600; }
     .stamp-box { display: inline-block; width: 65px; height: 65px; border: 1px dashed #94A3B8; vertical-align: middle; line-height: 65px; text-align: center; font-size: 10px; color: #64748B; margin-left: 8px; }
     @media print {
         .receipt-container { page-break-after: always; border: 2px solid #000; }
@@ -1275,7 +1323,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                         first_item = group_df.iloc[0]
                         total_donor_amt = group_df['amount'].sum()
                         
-                        # 식별번호 복호화 검증 (해시값일 경우 마스킹 번호로 안전 대치)
+                        # 식별번호 복호화 검증
                         if show_unmasked_id and first_item['id_number_cipher']:
                             candidate_id = decode_data(first_item['id_number_cipher'])
                             if len(candidate_id) == 64 and re.match(r'^[0-9a-fA-F]+$', candidate_id):
@@ -1288,22 +1336,28 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                         curr_addr = first_item['donor_address'] if first_item['donor_address'] else "-"
                         rep_rec_no = first_item['receipt_no']
 
-                        # 6개 열(코드, 구분, 연월일, 품명/수량, 내용/단가, 금액) 단일 행 매핑
+                        # [요청 반영] 현물일 때만 품명/수량/단가 반영, 금액은 우측 정렬 통폐합
                         donation_rows_html = ""
                         for _, d_row in group_df.iterrows():
                             is_goods = (d_row["donation_type"] == "현물")
-                            item_name_val = d_row["purpose"] if is_goods else "&nbsp;"
-                            item_desc_val = d_row["purpose"] if is_goods else "&nbsp;"
+                            item_name_val = d_row["goods_name"] if (is_goods and 'goods_name' in d_row and d_row["goods_name"]) else ("기부금" if not is_goods else "&nbsp;")
+                            item_desc_val = d_row["purpose"] if is_goods else d_row["purpose"]
+                            item_qty_val = d_row["goods_qty"] if (is_goods and 'goods_qty' in d_row and d_row["goods_qty"]) else "&nbsp;"
+                            item_price_val = d_row["goods_unit_price"] if (is_goods and 'goods_unit_price' in d_row and d_row["goods_unit_price"]) else "&nbsp;"
                             row_amt_str = f"{int(d_row['amount']):,}"
 
                             donation_rows_html += (
                                 f'<tr>'
-                                f'<td style="border:1px solid #000; padding:5px; text-align:center;">{d_row["code"]}</td>'
-                                f'<td style="border:1px solid #000; padding:5px; text-align:center;">{d_row["donation_type"]}</td>'
-                                f'<td style="border:1px solid #000; padding:5px; text-align:center;">{d_row["donation_date"]}</td>'
-                                f'<td style="border:1px solid #000; padding:5px; text-align:center;">{item_name_val}</td>'
-                                f'<td style="border:1px solid #000; padding:5px; text-align:center;">{item_desc_val}</td>'
-                                f'<td style="border:1px solid #000; padding:5px; text-align:right; font-weight:700;">{row_amt_str}</td>'
+                                f'<td rowspan="2" style="border:1px solid #000; padding:5px; vertical-align:middle;">{d_row["code"]}</td>'
+                                f'<td rowspan="2" style="border:1px solid #000; padding:5px; vertical-align:middle;">{d_row["donation_type"]}</td>'
+                                f'<td rowspan="2" style="border:1px solid #000; padding:5px; vertical-align:middle;">{d_row["donation_date"]}</td>'
+                                f'<td style="border:1px solid #000; padding:5px;">{item_name_val}</td>'
+                                f'<td style="border:1px solid #000; padding:5px;">{item_desc_val}</td>'
+                                f'<td rowspan="2" style="border:1px solid #000; padding:5px; text-align:right; font-weight:700; vertical-align:middle;">{row_amt_str}</td>'
+                                f'</tr>'
+                                f'<tr>'
+                                f'<td style="border:1px solid #000; padding:5px;">{item_qty_val}</td>'
+                                f'<td style="border:1px solid #000; padding:5px;">{item_price_val}</td>'
                                 f'</tr>'
                             )
 
@@ -1317,7 +1371,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         <table style="border-collapse:collapse; font-size:11px;">
             <tr>
                 <th style="border:1px solid #000; padding:3px 8px; background:#FFF; font-weight:700;">일련번호</th>
-                <td style="border:1px solid #000; padding:3px 12px; background:#FFF; font-weight:800; font-family:monospace;">{rep_rec_no}</td>
+                <td style="border:1px solid #000; padding:3px 12px; background:#FFF; font-weight:800; font-family:monospace; text-align:center;">{rep_rec_no}</td>
             </tr>
         </table>
     </div>
@@ -1328,38 +1382,38 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
     <table class="receipt-table" style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:11px; background:#FFF;">
         <tr>
             <th style="border:1px solid #000; background:#FFF; padding:5px; width:22%;">성명(법인명)</th>
-            <td style="border:1px solid #000; padding:5px; width:28%; text-align:center; font-weight:700;">{first_item["donor_name"]}</td>
+            <td style="border:1px solid #000; padding:5px; width:28%; font-weight:700;">{first_item["donor_name"]}</td>
             <th style="border:1px solid #000; background:#FFF; padding:5px; width:25%;">주민등록번호<br>(사업자등록번호)</th>
-            <td style="border:1px solid #000; padding:5px; width:25%; text-align:center; font-family:monospace; font-weight:600;">{display_id}</td>
+            <td style="border:1px solid #000; padding:5px; width:25%; font-family:monospace; font-weight:600;">{display_id}</td>
         </tr>
         <tr>
             <th style="border:1px solid #000; background:#FFF; padding:5px;">주소(소재지)</th>
-            <td colspan="3" style="border:1px solid #000; padding:5px; text-align:center;">{curr_addr}</td>
+            <td colspan="3" style="border:1px solid #000; padding:5px;">{curr_addr}</td>
         </tr>
     </table>
     <div style="font-size:12px; font-weight:700; margin:6px 0 3px 0;">● 기부금 단체</div>
     <table class="receipt-table" style="width:100%; border-collapse:collapse; margin-bottom:4px; font-size:11px; background:#FFF;">
         <tr>
             <th style="border:1px solid #000; background:#FFF; padding:5px; width:22%;">단체명</th>
-            <td style="border:1px solid #000; padding:5px; width:28%; text-align:center; font-weight:600;">{org_name}</td>
+            <td style="border:1px solid #000; padding:5px; width:28%; font-weight:600;">{org_name}</td>
             <th style="border:1px solid #000; background:#FFF; padding:5px; width:25%;">사업자등록번호(고유번호)</th>
-            <td style="border:1px solid #000; padding:5px; width:25%; text-align:center; font-family:monospace;">{org_biz_no}</td>
+            <td style="border:1px solid #000; padding:5px; width:25%; font-family:monospace;">{org_biz_no}</td>
         </tr>
         <tr>
             <th style="border:1px solid #000; background:#FFF; padding:5px;">(지점명)</th>
-            <td style="border:1px solid #000; padding:5px; text-align:center;">&nbsp;</td>
+            <td style="border:1px solid #000; padding:5px;">&nbsp;</td>
             <th style="border:1px solid #000; background:#FFF; padding:5px;">(지점 사업자등록번호 등)</th>
-            <td style="border:1px solid #000; padding:5px; text-align:center;">&nbsp;</td>
+            <td style="border:1px solid #000; padding:5px;">&nbsp;</td>
         </tr>
         <tr>
             <th style="border:1px solid #000; background:#FFF; padding:5px;">소재지</th>
-            <td style="border:1px solid #000; padding:5px; text-align:center;">{org_addr}</td>
+            <td style="border:1px solid #000; padding:5px;">{org_addr}</td>
             <th style="border:1px solid #000; background:#FFF; padding:5px;">기부금공제대상 공익법인등 근거법령</th>
-            <td style="border:1px solid #000; padding:5px; text-align:center; font-size:10.5px;">{org_law}</td>
+            <td style="border:1px solid #000; padding:5px; font-size:10.5px;">{org_law}</td>
         </tr>
         <tr>
             <th style="border:1px solid #000; background:#FFF; padding:5px;">(지점 소재지)</th>
-            <td colspan="3" style="border:1px solid #000; padding:5px; text-align:center;">&nbsp;</td>
+            <td colspan="3" style="border:1px solid #000; padding:5px;">&nbsp;</td>
         </tr>
     </table>
     <div style="font-size:9.5px; color:#64748B; margin-bottom:8px;">* 기부금 단체의 지점(분사무소)이 기부받은 경우, 지점명 등을 추가로 기재할 수 있습니다.</div>
@@ -1367,37 +1421,37 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
     <table class="receipt-table" style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:11px; background:#FFF;">
         <tr>
             <th style="border:1px solid #000; background:#FFF; padding:5px; width:22%;">단체명</th>
-            <td style="border:1px solid #000; padding:5px; width:28%; text-align:center;">&nbsp;</td>
+            <td style="border:1px solid #000; padding:5px; width:28%;">&nbsp;</td>
             <th style="border:1px solid #000; background:#FFF; padding:5px; width:25%;">사업자등록번호</th>
-            <td style="border:1px solid #000; padding:5px; width:25%; text-align:center;">&nbsp;</td>
+            <td style="border:1px solid #000; padding:5px; width:25%;">&nbsp;</td>
         </tr>
         <tr>
             <th style="border:1px solid #000; background:#FFF; padding:5px;">소재지</th>
-            <td colspan="3" style="border:1px solid #000; padding:5px; text-align:center;">&nbsp;</td>
+            <td colspan="3" style="border:1px solid #000; padding:5px;">&nbsp;</td>
         </tr>
     </table>
     <div style="font-size:12px; font-weight:700; margin:6px 0 3px 0;">● 기부내용</div>
     <table class="receipt-table" style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:11px; background:#FFF;">
         <tr>
-            <th rowspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:10%;">코드</th>
-            <th rowspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:15%;">구분<br>(금전 또는 현물)</th>
-            <th rowspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:16%;">연월일</th>
-            <th colspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:39%;">내 &nbsp;&nbsp;&nbsp;&nbsp; 용</th>
+            <th rowspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:9%;">코드</th>
+            <th rowspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:13%;">구분<br>(금전 또는 현물)</th>
+            <th rowspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:15%;">연월일</th>
+            <th colspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:43%;">내 &nbsp;&nbsp;&nbsp;&nbsp; 용</th>
             <th rowspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:20%;">금액</th>
         </tr>
         <tr>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; width:19%;">품명</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; width:20%;">내용</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%;">품명</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%;">내용</th>
         </tr>
         <tr>
-            <th colspan="3" style="border:1px solid #000; background:#FFF; padding:4px; text-align:center;">합 계 금 액</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center;">수량</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center;">단가</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center;">금액</th>
+            <th colspan="3" style="border:1px solid #000; background:#FFF; padding:4px;">합 계 금 액</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px;">수량</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px;">단가</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px;">금액</th>
         </tr>
         {donation_rows_html}
         <tr>
-            <th colspan="5" style="border:1px solid #000; background:#FFF; padding:6px; text-align:center; font-weight:700;">합 계 금 액</th>
+            <th colspan="5" style="border:1px solid #000; background:#FFF; padding:6px; font-weight:700;">합 계 금 액</th>
             <td style="border:1px solid #000; padding:6px; text-align:right; font-weight:800; font-size:12px;">{int(total_donor_amt):,}</td>
         </tr>
     </table>
@@ -1701,23 +1755,31 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     st.caption(f"✓ 매월 약정 인식: **{pl_month:,} 원**")
 
                 st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
-                st.markdown("##### 3. 기본 사용 용도 및 약정 상태")
+                
+                # [요청 반영] 정기 약정 등록 시 예산과목 / 대분류 / 소분류 계층형 입력 적용
+                st.markdown("##### 3. 기본 사용 용도 (예산과목 ➔ 대분류 ➔ 소분류) 및 약정 상태")
+                pl_bs_c1, pl_bs_c2, pl_bs_c3 = st.columns([1.5, 2, 2.5])
+                with pl_bs_c1:
+                    pl_b_opts = ["일반기부금", "지정기부금", "현물기부금"]
+                    pl_budget_subj = st.selectbox("예산과목", pl_b_opts, key="pl_bs_reg")
+                
+                pl_maj_map = purpose_tree.get(pl_budget_subj, {})
+                pl_avail_majors = list(pl_maj_map.keys()) or ["기본"]
+                with pl_bs_c2:
+                    pl_chosen_maj = st.selectbox("대분류", pl_avail_majors, key=f"pl_maj_{pl_budget_subj}")
+                
+                pl_sub_candidates = pl_maj_map.get(pl_chosen_maj, []) + ["기타(직접입력)"]
+                with pl_bs_c3:
+                    pl_chosen_sub = st.selectbox("소분류", pl_sub_candidates, key=f"pl_sub_{pl_chosen_maj}")
+                    if pl_chosen_sub == "기타(직접입력)":
+                        pl_custom_sub = st.text_input("상세 소분류 직접 입력", placeholder="예: 상세 목적", key="pl_cust_sub_input")
+                        pl_final_purpose = f"{pl_chosen_maj} - {pl_custom_sub.strip()}" if pl_custom_sub.strip() else pl_chosen_maj
+                    else:
+                        pl_final_purpose = f"{pl_chosen_maj} - {pl_chosen_sub}"
+
                 pl_st1, pl_st2 = st.columns([2, 1])
                 with pl_st1:
-                    all_sub_options = []
-                    for b_name, majs in purpose_tree.items():
-                        for m_name, subs in majs.items():
-                            for s_item in subs:
-                                all_sub_options.append(f"[{b_name}] {m_name} - {s_item}")
-                    if not all_sub_options:
-                        all_sub_options = ["대학발전기금" if current_entity == "UNIVERSITY" else "발전기금"]
-                    all_sub_options.append("기타(직접입력)")
-
-                    pl_purp_sel = st.selectbox("기본 사용 용도", all_sub_options, key="pl_purp_sel")
-                    if pl_purp_sel == "기타(직접입력)":
-                        pl_final_purpose = st.text_input("기타 상세 용도 직접 입력", placeholder="예: 지정 장학금", key="pl_purp_cust")
-                    else:
-                        pl_final_purpose = pl_purp_sel
+                    st.info(f"✓ 설정된 기본 용도: **{pl_final_purpose}**")
                 with pl_st2:
                     pl_status = st.selectbox("약정 상태", ["진행중", "일시중지", "약정종료"], key="pl_status_reg")
 
@@ -1730,12 +1792,13 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                             INSERT INTO donation_pledges (
                                 entity_type, donor_category, payment_method, donor_name,
                                 id_number_masked, id_number_cipher, total_pledge_amt, installment_count,
-                                monthly_amt, default_purpose, status, created_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                monthly_amt, budget_subject, major_category, sub_category, default_purpose, status, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             current_entity, pl_cat, pl_meth, pl_name.strip(),
                             mask_id_number(pl_raw_id), encode_data(pl_raw_id.strip()),
                             float(pl_tot), int(pl_cnt), float(pl_month),
+                            pl_budget_subj, pl_chosen_maj, pl_chosen_sub,
                             pl_final_purpose.strip() or "일반", pl_status, now_str
                         ))
                         conn.commit()
@@ -1814,6 +1877,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                             d_main = "개인" if row['donor_category'] in ["교직원", "일반인"] else "기업체"
                             d_sub = row['donor_category']
                             is_stat_val = 1 if (current_entity == "FOUNDATION" and "법정부담금" in row['default_purpose']) else 0
+                            p_subj = row['budget_subject'] if 'budget_subject' in row and row['budget_subject'] else batch_budget
 
                             cursor.execute("""
                                 INSERT INTO donation_receipts (
@@ -1823,7 +1887,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                                     code, amount, receipt_no, receipt_date, donor_address, is_statutory_transfer, created_at
                                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, (
-                                current_entity, current_year, str(batch_date), batch_budget, row['default_purpose'],
+                                current_entity, current_year, str(batch_date), p_subj, row['default_purpose'],
                                 d_main, d_sub, row['donor_name'],
                                 row['id_number_masked'], row['id_number_cipher'], "금전",
                                 "10", float(row['monthly_amt']), "미발급", str(batch_date), "", is_stat_val, now_str
