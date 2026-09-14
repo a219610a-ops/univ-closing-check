@@ -198,6 +198,39 @@ def init_db():
         )
     """)
 
+    # 5) 기부 용도 분류 체계 테이블 (큰 구분 / 세부 구분)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS donation_purposes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,
+            major_category TEXT NOT NULL,
+            sub_category TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(entity_type, major_category, sub_category)
+        )
+    """)
+
+    # 기본 용도 분류 데이터 초기 세팅 (최초 1회)
+    cursor.execute("SELECT COUNT(*) FROM donation_purposes")
+    if cursor.fetchone()[0] == 0:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        defaults = [
+            ("UNIVERSITY", "대학발전기금", "일반발전", now_str),
+            ("UNIVERSITY", "대학발전기금", "교육시설확충", now_str),
+            ("UNIVERSITY", "장학기금", "가계곤란장학", now_str),
+            ("UNIVERSITY", "장학기금", "성적우수장학", now_str),
+            ("UNIVERSITY", "학과발전기금", "기계공학과", now_str),
+            ("UNIVERSITY", "학과발전기금", "간호학과", now_str),
+            ("UNIVERSITY", "특수목적기금", "학술연구지원", now_str),
+            ("FOUNDATION", "발전기금", "법인발전기금", now_str),
+            ("FOUNDATION", "지정기부금", "법정부담금", now_str),
+            ("FOUNDATION", "지정기부금", "수익사업지원", now_str)
+        ]
+        cursor.executemany("""
+            INSERT OR IGNORE INTO donation_purposes (entity_type, major_category, sub_category, created_at)
+            VALUES (?, ?, ?, ?)
+        """, defaults)
+
     # 구버전 DB 자동 마이그레이션: 누락된 컬럼 자동 보정
     cursor.execute("PRAGMA table_info(donation_receipts)")
     r_cols = [c[1] for c in cursor.fetchall()]
@@ -223,7 +256,7 @@ def init_db():
 
 init_db()
 
-# 문자열 금액 파싱 유틸 함수
+# 문자열 금액 파싱 및 포맷팅 함수
 def parse_money(val_str):
     if not val_str:
         return 0
@@ -311,6 +344,23 @@ def delete_donation_receipt(receipt_id):
     finally:
         conn.close()
 
+# 기부 용도 분류 데이터 로드 함수
+def get_purposes_dict(entity_type):
+    conn = get_db_connection()
+    df = pd.read_sql_query("""
+        SELECT major_category, sub_category FROM donation_purposes 
+        WHERE entity_type = ? ORDER BY major_category, sub_category
+    """, conn, params=(entity_type,))
+    conn.close()
+    p_dict = {}
+    for _, row in df.iterrows():
+        maj = row['major_category']
+        sub = row['sub_category']
+        if maj not in p_dict:
+            p_dict[maj] = []
+        p_dict[maj].append(sub)
+    return p_dict
+
 # ==========================================
 # 3. 글로벌 세션 상태 및 상단 미니 메뉴바
 # ==========================================
@@ -385,8 +435,8 @@ if st.session_state.current_page == "HOME":
             st.caption("대학 및 법인 기부금 수입·정기약정·원천별 지출·발급명세 통합 관리")
             st.markdown("""
             * **회계연도별 독립 관리** (2026, 2025 등 연도별 분리 정산)
-            * 교직원 급여공제 및 정기 기부약정자 통합 명단 등록 & 1클릭 일괄 수입 생성
-            * 대학 회계 / 법인 회계 작업 환경 완벽 분리 선택
+            * **사용자 정의 기부 용도 체계 관리** (큰 구분 / 세부 구분 직접 등록·수정·삭제)
+            * 교직원 급여공제 및 정기 약정자 관리 & 1클릭 당월 수입 일괄 채번
             * 수입 건 수정·삭제 관리 및 실시간 수입 합계 확인
             * 국세청 법정 기부금영수증 & 용도별 집행 정산표 엑셀 다운로드
             """)
@@ -413,7 +463,7 @@ elif st.session_state.current_page == "DONATION_SELECT":
             st.markdown("""
             * 회계연도별(3월~익년 2월) 기부금 수입 및 학생 장학/학과 지출 관리
             * 교직원 급여공제 정기기부 약정자 명단 등록 및 매월 일괄 수입 자동 채번
-            * 장학기금, 학과발전기금, 시설확충기금 등 교비 기부금 전용
+            * 사용자 지정 대학발전기금, 장학기금, 학과발전기금 용도 분류 연동
             * 수입 등록·수정·삭제 관리 및 수입 합계 실시간 결산
             * 국세청 법정 영수증(코드 10) 및 용도별 정산표 엑셀 다운로드
             """)
@@ -431,8 +481,7 @@ elif st.session_state.current_page == "DONATION_SELECT":
             st.caption("학교법인으로 접수된 기부금 및 법정부담금 전출 특화 관리")
             st.markdown("""
             * 회계연도별(3월~익년 2월) 법인 발전기금 및 법인 지정기부금 독립 관리
-            * **용도별 전용 선택창** 지원 (발전기금, 법정부담금, 기타 직접입력)
-            * 법인 이사회 및 후원자 정기기부 약정자 일괄 관리
+            * 법인 전용 용도 분류 체계 관리 (발전기금, 법정부담금, 수익사업지원 등)
             * **법정부담금 전출용** 기부금 수입 및 학교 전출 지출 매핑 관리
             * 법인 세무 신고용 영수증 및 발급명세서 생성
             """)
@@ -447,7 +496,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
     top_c1, top_c2, top_c3 = st.columns([3, 1.8, 1.2])
     with top_c1:
         st.markdown(f'<div class="main-app-title">🎁 기부금 관리 시스템 [{entity_label}]</div>', unsafe_allow_html=True)
-        st.markdown('<div class="main-app-caption">기부금 수입 등록·수정·삭제, 정기약정 일괄생성, 지출 매핑 및 결산을 수행합니다.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="main-app-caption">기부금 수입 등록·수정·삭제, 기준정보 환경설정, 지출 매핑 및 결산을 수행합니다.</div>', unsafe_allow_html=True)
 
     with top_c2:
         available_years = get_existing_fiscal_years(current_entity)
@@ -503,6 +552,8 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
     """, conn, params=(current_entity,))
     conn.close()
 
+    purposes_dict = get_purposes_dict(current_entity)
+
     total_income = receipts_df['amount'].sum() if not receipts_df.empty else 0.0
     total_expense = expenses_df['amount'].sum() if not expenses_df.empty else 0.0
     balance = total_income - total_expense
@@ -527,12 +578,12 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
 
     st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
 
-    # 4개 독립 탭 구성
-    tab_manage, tab_pledge, tab_stmt, tab_official = st.tabs([
+    # 4개 독립 탭 구성 (관리 탭이 제일 뒤로 이동)
+    tab_manage, tab_stmt, tab_official, tab_config = st.tabs([
         f"📥 [{current_year} 회계연도] 기부금 수입·수정·삭제 및 지출 관리", 
-        f"📅 정기 기부(약정) 관리 (교직원 급여공제 등)",
         f"📊 [{current_year} 회계연도] 사용 용도별 집행 정산표",
-        f"📑 [{current_year} 회계연도] 국세청 법정 영수증 및 발급명세서"
+        f"📑 [{current_year} 회계연도] 국세청 법정 영수증 및 발급명세서",
+        f"⚙️ 환경설정 및 관리 (용도 분류 & 정기 약정)"
     ])
 
     # ==========================================
@@ -587,78 +638,59 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                 d_amt = parse_money(d_amt_input)
                 st.caption(f"✓ 실제 인식 금액: **{d_amt:,} 원**")
 
-            row2_2_c1, row2_2_c2, row2_2_c3, row2_2_c4 = st.columns([1.5, 3.2, 1.3, 1.5])
+            row2_2_c1, row2_2_c2, row2_2_c3, row2_2_c4 = st.columns([1.5, 3.5, 1.2, 1.4])
             with row2_2_c1:
                 b_opts = ["일반기부금", "지정기부금", "현물기부금"]
                 def_b_idx = b_opts.index(edit_row['budget_subject']) if is_edit_mode and edit_row['budget_subject'] in b_opts else 0
                 budget_subj = st.selectbox("예산과목", b_opts, index=def_b_idx, key=f"bs_{current_year}_{is_edit_mode}")
 
             with row2_2_c2:
-                # 회계별 사용용도 라디오 버튼형 선택창
+                # 동적 용도 분류(큰 구분 / 세부 구분) 선택창
+                major_keys = list(purposes_dict.keys())
                 if current_entity == "UNIVERSITY":
                     if budget_subj == "일반기부금":
-                        st.radio("사용 용도 선택", ["대학발전기금"], horizontal=True, key=f"u_rad_gen_{is_edit_mode}")
-                        final_purpose = "대학발전기금"
-                    elif budget_subj == "지정기부금":
-                        u_rad_opts = ["장학기금", "학과발전기금", "기타 (직접입력)"]
-                        def_u_idx = 0
-                        if is_edit_mode and edit_row['purpose'] in ["장학기금", "학과발전기금"]:
-                            def_u_idx = u_rad_opts.index(edit_row['purpose'])
-                        elif is_edit_mode and edit_row['purpose'] not in ["대학발전기금"]:
-                            def_u_idx = 2
-                        u_choice = st.radio("사용 용도 선택", u_rad_opts, index=def_u_idx, horizontal=True, key=f"u_rad_des_{is_edit_mode}")
-                        if u_choice == "기타 (직접입력)":
-                            def_u_custom = edit_row['purpose'] if (is_edit_mode and edit_row['purpose'] not in ["장학기금", "학과발전기금", "대학발전기금"]) else ""
-                            final_purpose = st.text_input("상세 용도 직접 입력", value=def_u_custom, placeholder="예: 학술연구기금 등", key=f"u_purp_custom_{is_edit_mode}")
+                        # 대학 일반기부금은 대학발전기금 단일 고정
+                        maj_sel = "대학발전기금" if "대학발전기금" in major_keys else (major_keys[0] if major_keys else "기본")
+                        sub_candidates = purposes_dict.get(maj_sel, ["일반발전"])
+                        sub_sel = st.selectbox("사용 세부 용도", sub_candidates, key=f"u_sub_gen_{is_edit_mode}")
+                        final_purpose = f"{maj_sel} - {sub_sel}" if sub_sel else maj_sel
+                    else:
+                        # 지정/현물 기부금은 큰 구분 선택 후 세부 구분 연동
+                        avail_maj = [k for k in major_keys if k != "대학발전기금"] or major_keys
+                        maj_sel = st.selectbox("큰 구분", avail_maj, key=f"u_maj_des_{is_edit_mode}")
+                        sub_candidates = purposes_dict.get(maj_sel, []) + ["기타(직접입력)"]
+                        sub_sel = st.selectbox("세부 구분", sub_candidates, key=f"u_sub_des_{is_edit_mode}")
+                        if sub_sel == "기타(직접입력)":
+                            def_u_custom = edit_row['purpose'] if is_edit_mode else ""
+                            final_purpose = st.text_input("상세 용도 직접 입력", value=def_u_custom, placeholder="예: 신설학과 발전기금", key=f"u_custom_purp_{is_edit_mode}")
                         else:
-                            final_purpose = u_choice
-                    else: # 현물기부금
-                        u_in_opts = ["교육기자재 기증", "기타 (직접입력)"]
-                        def_u_in_idx = 0
-                        if is_edit_mode and edit_row['purpose'] in ["교육기자재 기증"]:
-                            def_u_in_idx = u_in_opts.index(edit_row['purpose'])
-                        elif is_edit_mode:
-                            def_u_in_idx = 1
-                        u_in_choice = st.radio("사용 용도 선택", u_in_opts, index=def_u_in_idx, horizontal=True, key=f"u_rad_in_{is_edit_mode}")
-                        if u_in_choice == "기타 (직접입력)":
-                            def_u_in_custom = edit_row['purpose'] if (is_edit_mode and edit_row['purpose'] not in ["교육기자재 기증"]) else ""
-                            final_purpose = st.text_input("상세 용도 직접 입력", value=def_u_in_custom, placeholder="예: 도서 기증 등", key=f"u_purp_in_custom_{is_edit_mode}")
-                        else:
-                            final_purpose = u_in_choice
+                            final_purpose = f"{maj_sel} - {sub_sel}" if sub_sel else maj_sel
                 else:
-                    # 법인회계 전용 선택창
+                    # 법인회계 동적 연동
                     if budget_subj == "일반기부금":
-                        st.radio("사용 용도 선택", ["발전기금"], horizontal=True, key=f"f_rad_gen_{is_edit_mode}")
-                        final_purpose = "발전기금"
-                    elif budget_subj == "지정기부금":
-                        f_rad_opts = ["법정부담금", "기타 (직접입력)"]
-                        def_f_idx = 0
-                        if is_edit_mode and edit_row['purpose'] == "법정부담금":
-                            def_f_idx = 0
-                        elif is_edit_mode and edit_row['purpose'] != "발전기금":
-                            def_f_idx = 1
-                        p_choice = st.radio("사용 용도 선택", f_rad_opts, index=def_f_idx, horizontal=True, key=f"f_rad_des_{is_edit_mode}")
-                        if p_choice == "법정부담금":
-                            final_purpose = "법정부담금"
+                        maj_sel = "발전기금" if "발전기금" in major_keys else (major_keys[0] if major_keys else "발전기금")
+                        sub_candidates = purposes_dict.get(maj_sel, ["법인발전기금"])
+                        sub_sel = st.selectbox("사용 세부 용도", sub_candidates, key=f"f_sub_gen_{is_edit_mode}")
+                        final_purpose = f"{maj_sel} - {sub_sel}" if sub_sel else maj_sel
+                    else:
+                        avail_maj = [k for k in major_keys if k != "발전기금"] or major_keys
+                        maj_sel = st.selectbox("큰 구분", avail_maj, key=f"f_maj_des_{is_edit_mode}")
+                        sub_candidates = purposes_dict.get(maj_sel, []) + ["기타(직접입력)"]
+                        sub_sel = st.selectbox("세부 구분", sub_candidates, key=f"f_sub_des_{is_edit_mode}")
+                        if sub_sel == "기타(직접입력)":
+                            def_f_custom = edit_row['purpose'] if is_edit_mode else ""
+                            final_purpose = st.text_input("상세 용도 직접 입력", value=def_f_custom, placeholder="예: 지정 목적 사업", key=f"f_custom_purp_{is_edit_mode}")
                         else:
-                            def_custom = edit_row['purpose'] if (is_edit_mode and edit_row['purpose'] not in ["발전기금", "법정부담금"]) else ""
-                            final_purpose = st.text_input("상세 용도 직접 입력", value=def_custom, placeholder="예: 장학기금, 시설확충 등", key=f"f_purp_custom_{is_edit_mode}")
-                    else: # 현물기부금
-                        p_choice = st.radio("사용 용도 선택", ["현물기부", "기타 (직접입력)"], horizontal=True, key=f"f_rad_in_{is_edit_mode}")
-                        if p_choice == "현물기부":
-                            final_purpose = "현물기부"
-                        else:
-                            def_custom = edit_row['purpose'] if (is_edit_mode and edit_row['purpose'] not in ["현물기부"]) else ""
-                            final_purpose = st.text_input("상세 용도 직접 입력", value=def_custom, placeholder="예: 교육기자재 기증 등", key=f"f_purp_in_custom_{is_edit_mode}")
+                            final_purpose = f"{maj_sel} - {sub_sel}" if sub_sel else maj_sel
 
             with row2_2_c3:
                 def_code = edit_row['code'] if is_edit_mode else "10"
-                d_code = st.text_input("구분 코드 (법정 서식)", value=def_code, key=f"dc_{current_year}_{is_edit_mode}")
+                d_code = st.text_input("구분 코드", value=def_code, key=f"dc_{current_year}_{is_edit_mode}")
 
             with row2_2_c4:
                 t_opts = ["금전", "현물"]
                 def_t_idx = t_opts.index(edit_row['donation_type']) if is_edit_mode and edit_row['donation_type'] in t_opts else 0
-                d_type = st.selectbox("기부 내용 구분", t_opts, index=def_t_idx, key=f"dt_{current_year}_{is_edit_mode}")
+                d_type = st.selectbox("내용 구분", t_opts, index=def_t_idx, key=f"dt_{current_year}_{is_edit_mode}")
 
             st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
@@ -674,7 +706,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             with r3:
                 is_stat_chk = 0
                 if current_entity == "FOUNDATION":
-                    default_checked = True if (is_edit_mode and edit_row['is_statutory_transfer'] == 1) or (budget_subj == "지정기부금" and final_purpose == "법정부담금") else False
+                    default_checked = True if (is_edit_mode and edit_row['is_statutory_transfer'] == 1) or ("법정부담금" in final_purpose) else False
                     is_stat = st.checkbox("📌 법정부담금 전출용 기부금 여부", value=default_checked, key=f"is_stat_{current_year}_{is_edit_mode}")
                     is_stat_chk = 1 if is_stat else 0
 
@@ -786,7 +818,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                 })
                 seq_num += 1
 
-            # 최하단 [합계] 행 추가
+            # 최하단 [합계] 행 고정 추가
             sum_income_val = sum([row["기부수입액"] for row in table_rows])
             sum_exp_val = sum([row["지출누계"] for row in table_rows])
             sum_rem_val = sum([row["남은잔액"] for row in table_rows])
@@ -807,7 +839,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
 
             summary_table_df = pd.DataFrame(table_rows)
 
-            # 셀렉트박스용 유효 수입ID 목록 (합계 행 제외)
             valid_receipt_ids = [r_id for r_id in summary_table_df['수입ID'].tolist() if r_id != 0]
             if st.session_state.selected_receipt_id_for_expense not in valid_receipt_ids and valid_receipt_ids:
                 st.session_state.selected_receipt_id_for_expense = valid_receipt_ids[0]
@@ -824,7 +855,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     "기부자명": st.column_config.TextColumn("기부자명", width=130),
                     "식별번호": st.column_config.TextColumn("식별번호", width=140),
                     "예산과목": st.column_config.TextColumn("예산과목", width=110),
-                    "사용용도": st.column_config.TextColumn("사용용도", width=150),
+                    "사용용도": st.column_config.TextColumn("사용용도", width=160),
                     "기부수입액": st.column_config.NumberColumn("기부수입액 (원)", format="%,d", width=130),
                     "지출누계": st.column_config.NumberColumn("지출누계 (원)", format="%,d", width=130),
                     "남은잔액": st.column_config.NumberColumn("남은잔액 (원)", format="%,d", width=130)
@@ -998,220 +1029,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             st.info(f"{current_year} 회계연도에 등록된 기부금 수입이 없습니다. 상단에서 기부금을 먼저 등록해 주세요.")
 
     # ==========================================
-    # TAB 2: 📅 정기 기부(약정) 관리 (교직원 급여공제 등)
-    # ==========================================
-    with tab_pledge:
-        st.markdown(f"#### 📅 [{entity_label}] 정기 기부(약정)자 명단 관리 및 당월 수입 일괄 생성")
-        st.caption("교직원 급여공제, CMS 자동이체, 정기 약정자를 등록해두고 매월 급여/이체일에 클릭 한 번으로 당월 기부금 수입으로 일괄 생성합니다.")
-
-        # 1. 약정자 신규 등록 폼
-        with st.expander("➕ 새 정기 기부(약정)자 등록", expanded=pledges_df.empty):
-            st.markdown("##### 1. 기부자 기본 정보")
-            pl_col1, pl_col2, pl_col3, pl_col4 = st.columns(4)
-            with pl_col1:
-                pl_cat = st.selectbox("기부자 구분", ["교직원(급여공제)", "일반인", "기업/단체"], key="pl_cat_reg")
-            with pl_col2:
-                meth_opts = ["급여공제", "직접입금"] if "교직원" in pl_cat else ["직접입금", "급여공제"]
-                pl_meth = st.selectbox("기부 방식", meth_opts, key="pl_meth_reg")
-            with pl_col3:
-                pl_name = st.text_input("기부자명 (성명/법인명)", placeholder="예: 김교수, 이직원", key="pl_name_reg")
-            with pl_col4:
-                pl_raw_id = st.text_input("주민등록번호 / 사업자번호", placeholder="예: 850315-1234567", type="password", help="마스킹 및 암호화 보관됩니다.", key="pl_id_reg")
-
-            st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
-            st.markdown("##### 2. 약정 금액 및 분납 조건")
-            pl_amt1, pl_amt2, pl_amt3 = st.columns(3)
-            with pl_amt1:
-                pl_tot_str = st.text_input("전체 약정액 (원) [선택]", value="0", help="정해진 총액 약정이 있는 경우 입력", key="pl_tot_str")
-                pl_tot = parse_money(pl_tot_str)
-                st.caption(f"✓ 전체 약정: **{pl_tot:,} 원**")
-            with pl_amt2:
-                pl_cnt = st.number_input("분납 횟수 (회)", min_value=0, max_value=240, value=0, help="0 입력 시 무기한 매월 정기 납부", key="pl_cnt_reg")
-                st.caption("0회: 무기한 정기 납부")
-            with pl_amt3:
-                calc_monthly_def = format_money(pl_tot // pl_cnt) if (pl_tot > 0 and pl_cnt > 0) else "50,000"
-                pl_month_str = st.text_input("매월 약정액 (원) [필수]", value=calc_monthly_def, key="pl_month_str")
-                pl_month = parse_money(pl_month_str)
-                st.caption(f"✓ 매월 공제/입금액: **{pl_month:,} 원**")
-
-            st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
-            st.markdown("##### 3. 기본 사용 용도 및 약정 상태")
-            pl_st1, pl_st2 = st.columns([2, 1])
-            with pl_st1:
-                def_purp_opts = ["대학발전기금", "장학기금", "학과발전기금", "기타"] if current_entity == "UNIVERSITY" else ["발전기금", "법정부담금", "기타"]
-                pl_purp_sel = st.selectbox("기본 사용 용도", def_purp_opts, key="pl_purp_sel")
-                if pl_purp_sel == "기타":
-                    pl_final_purpose = st.text_input("기타 상세 용도", placeholder="예: 지정 장학금", key="pl_purp_cust")
-                else:
-                    pl_final_purpose = pl_purp_sel
-            with pl_st2:
-                pl_status = st.selectbox("약정 상태", ["진행중", "일시중지", "약정종료"], key="pl_status_reg")
-
-            if st.button("💾 정기 기부(약정)자 등록", type="primary", use_container_width=True):
-                if pl_name.strip() and pl_month > 0:
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    cursor.execute("""
-                        INSERT INTO donation_pledges (
-                            entity_type, donor_category, payment_method, donor_name,
-                            id_number_masked, id_number_cipher, total_pledge_amt, installment_count,
-                            monthly_amt, default_purpose, status, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        current_entity, pl_cat, pl_meth, pl_name.strip(),
-                        mask_id_number(pl_raw_id), simple_encrypt(pl_raw_id),
-                        float(pl_tot), int(pl_cnt), float(pl_month),
-                        pl_final_purpose.strip() or "일반", pl_status, now_str
-                    ))
-                    conn.commit()
-                    conn.close()
-                    st.success(f"[{pl_name}] 님의 매월 {pl_month:,}원 정기 약정이 등록되었습니다!")
-                    st.rerun()
-                else:
-                    st.warning("기부자명과 매월 약정액을 정확히 입력해 주세요.")
-
-        # 2. 당월 기부금 일괄 생성기 (핵심 기능)
-        st.markdown("---")
-        st.markdown(f"##### ⚡ [{current_year} 회계연도] 당월 정기 기부금(급여공제분) 일괄 수입 생성")
-        
-        active_pledges = pledges_df[pledges_df['status'] == '진행중'].copy() if not pledges_df.empty else pd.DataFrame()
-
-        if not active_pledges.empty:
-            bat_c1, bat_c2, bat_c3 = st.columns([2, 2, 2])
-            with bat_c1:
-                batch_date = st.date_input("당월 기부(급여공제) 일자", datetime.now(), key="batch_donation_date")
-            with bat_c2:
-                batch_filter = st.selectbox("대상 구분 필터", ["전체 진행중 약정자", "교직원(급여공제)만", "직접입금자만"], key="batch_filter")
-            with bat_c3:
-                batch_budget = st.selectbox("일괄 적용 예산과목", ["일반기부금", "지정기부금"], key="batch_budget")
-
-            filtered_pledges = active_pledges
-            if batch_filter == "교직원(급여공제)만":
-                filtered_pledges = active_pledges[active_pledges['donor_category'] == '교직원(급여공제)']
-            elif batch_filter == "직접입금자만":
-                filtered_pledges = active_pledges[active_pledges['payment_method'] == '직접입금']
-
-            st.markdown(f"""
-            <div class="total-banner">
-                <div>
-                    <span style="font-size:14px; font-weight:700; color:#1E3A8A;">📋 생성 대상 집계:</span>
-                    <span style="font-size:13.5px; color:#475569; margin-left:8px;">총 <b>{len(filtered_pledges)}</b> 명 선택됨</span>
-                </div>
-                <div>
-                    <span style="font-size:15px; font-weight:700; color:#1D4ED8;">일괄 수입 예정액: {filtered_pledges['monthly_amt'].sum():,.0f} 원</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-            disp_p_df = filtered_pledges[['donor_name', 'donor_category', 'payment_method', 'monthly_amt', 'default_purpose', 'id_number_masked']].copy()
-            disp_p_df.columns = ['기부자명', '기부자 구분', '기부방식', '당월공제액(원)', '사용용도', '식별번호']
-            st.dataframe(
-                disp_p_df,
-                use_container_width=True,
-                height=200,
-                hide_index=True,
-                column_config={
-                    "당월공제액(원)": st.column_config.NumberColumn(format="%,d")
-                }
-            )
-
-            if st.button(f"🚀 위 {len(filtered_pledges)}명 당월 기부금 수입으로 일괄 생성 확정", type="primary", use_container_width=True):
-                if not filtered_pledges.empty:
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    base_rec_no = generate_receipt_no(current_entity, current_year)
-                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                    created_count = 0
-                    for idx, (_, row) in enumerate(filtered_pledges.iterrows()):
-                        cur_no = generate_next_receipt_no_from_base(base_rec_no, offset=idx)
-                        d_main = "개인" if "교직원" in row['donor_category'] or "일반" in row['donor_category'] else "기업체"
-                        d_sub = "교직원" if "교직원" in row['donor_category'] else ("일반인" if "일반" in row['donor_category'] else "기업체")
-                        is_stat_val = 1 if (current_entity == "FOUNDATION" and row['default_purpose'] == "법정부담금") else 0
-
-                        cursor.execute("""
-                            INSERT INTO donation_receipts (
-                                entity_type, fiscal_year, donation_date, budget_subject, purpose,
-                                donor_main_type, donor_sub_type, donor_name,
-                                id_number_masked, id_number_cipher, donation_type,
-                                code, amount, receipt_no, receipt_date, is_statutory_transfer, created_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            current_entity, current_year, str(batch_date), batch_budget, row['default_purpose'],
-                            d_main, d_sub, row['donor_name'],
-                            row['id_number_masked'], row['id_number_cipher'], "금전",
-                            "10", float(row['monthly_amt']), cur_no, str(batch_date), is_stat_val, now_str
-                        ))
-                        created_count += 1
-
-                    conn.commit()
-                    conn.close()
-                    st.success(f"🎉 총 {created_count}명의 정기 기부금(합계: {filtered_pledges['monthly_amt'].sum():,.0f}원)이 {current_year}년 수입으로 일괄 등록되었습니다!")
-                    st.rerun()
-                else:
-                    st.warning("선택된 대상자가 없습니다.")
-        else:
-            st.info("현재 등록된 '진행중' 약정자가 없습니다. 상단에서 약정자를 먼저 등록해 주세요.")
-
-        # 3. 전체 약정자 목록 대장
-        st.markdown("---")
-        st.markdown("##### 📋 전체 정기 기부(약정)자 명단 관리")
-        if not pledges_df.empty:
-            pledge_table = pledges_df.copy()
-            pledge_table['연번'] = range(1, len(pledge_table) + 1)
-            st.dataframe(
-                pledge_table[['연번', 'donor_name', 'donor_category', 'payment_method', 'total_pledge_amt', 'installment_count', 'monthly_amt', 'default_purpose', 'status']],
-                use_container_width=True,
-                height=220,
-                hide_index=True,
-                column_config={
-                    "연번": st.column_config.NumberColumn(width=60),
-                    "donor_name": st.column_config.TextColumn("기부자명", width=110),
-                    "donor_category": st.column_config.TextColumn("기부자 구분", width=120),
-                    "payment_method": st.column_config.TextColumn("기부방식", width=90),
-                    "total_pledge_amt": st.column_config.NumberColumn("전체약정액 (원)", format="%,d", width=120),
-                    "installment_count": st.column_config.NumberColumn("분납횟수", width=80),
-                    "monthly_amt": st.column_config.NumberColumn("매월약정액 (원)", format="%,d", width=120),
-                    "default_purpose": st.column_config.TextColumn("기본용도", width=130),
-                    "status": st.column_config.TextColumn("상태", width=80)
-                }
-            )
-
-            # 약정 상태 변경 및 삭제
-            pl_ctrl1, pl_ctrl2, pl_ctrl3 = st.columns([3, 1.5, 1.5])
-            with pl_ctrl1:
-                sel_pledge_id = st.selectbox(
-                    "약정 상태 변경 대상 선택",
-                    pledges_df['id'].tolist(),
-                    format_func=lambda x: f"[{pledges_df[pledges_df['id']==x]['donor_category'].values[0]}] {pledges_df[pledges_df['id']==x]['donor_name'].values[0]} 님 (월 {pledges_df[pledges_df['id']==x]['monthly_amt'].values[0]:,.0f}원 / 현재: {pledges_df[pledges_df['id']==x]['status'].values[0]})",
-                    key="sel_pl_action"
-                )
-            with pl_ctrl2:
-                new_st = st.selectbox("변경할 상태", ["진행중", "일시중지", "약정종료"], key="new_st_choice")
-                if st.button("상태 갱신", use_container_width=True):
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("UPDATE donation_pledges SET status = ? WHERE id = ?", (new_st, sel_pledge_id))
-                    conn.commit()
-                    conn.close()
-                    st.success("약정 상태가 변경되었습니다.")
-                    st.rerun()
-            with pl_ctrl3:
-                st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)
-                if st.button("🗑️ 약정자 삭제", type="secondary", use_container_width=True):
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("DELETE FROM donation_pledges WHERE id = ?", (sel_pledge_id,))
-                    conn.commit()
-                    conn.close()
-                    st.success("약정자가 삭제되었습니다.")
-                    st.rerun()
-        else:
-            st.caption("등록된 약정자가 없습니다.")
-
-    # ==========================================
-    # TAB 3: 사용 용도별 집행 정산표
+    # TAB 2: 사용 용도별 집행 정산표
     # ==========================================
     with tab_stmt:
         st.markdown(f"#### 📊 [{current_year} 회계연도] 사용 용도별 집행 정산표")
@@ -1257,7 +1075,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         )
 
     # ==========================================
-    # TAB 4: 국세청 법정 영수증 및 발급명세서
+    # TAB 3: 국세청 법정 영수증 및 발급명세서
     # ==========================================
     with tab_official:
         st.markdown(f"#### 📑 [{current_year} 회계연도] 국세청 법정 영수증 및 발급명세서 다운로드")
@@ -1314,6 +1132,318 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                 )
             else:
                 st.info(f"{current_year}년도 발급명세서 데이터가 없습니다.")
+
+    # ==========================================
+    # TAB 4: ⚙️ 환경설정 및 관리 (용도 분류 & 정기 약정)
+    # ==========================================
+    with tab_config:
+        st.markdown(f"#### ⚙️ [{entity_label}] 기준정보 환경설정 및 관리")
+        st.caption("기부 용도 체계(큰 구분 / 세부 구분)를 등록하고, 정기 약정자(교직원 급여공제 등)를 일괄 관리합니다.")
+
+        cfg_mode = st.radio("관리 대상 선택", ["🏷️ 기부 용도 분류 체계 관리", "📅 정기 기부(약정)자 관리"], horizontal=True)
+
+        # ----------------------------------------------------
+        # 1. 기부 용도 분류 체계 관리 (신규 기능)
+        # ----------------------------------------------------
+        if cfg_mode == "🏷️ 기부 용도 분류 체계 관리":
+            st.markdown("##### 🏷️ 기부 용도 분류 등록 및 관리 (큰 구분 / 세부 구분)")
+            
+            with st.expander("➕ 새 용도 분류 항목 추가", expanded=True):
+                u_c1, u_c2 = st.columns(2)
+                with u_c1:
+                    existing_majors = list(purposes_dict.keys())
+                    maj_mode = st.radio("큰 구분(대분류) 선택 방식", ["기존 큰 구분 선택", "새 큰 구분 직접 입력"], horizontal=True)
+                    if maj_mode == "기존 큰 구분 선택" and existing_majors:
+                        target_maj = st.selectbox("큰 구분(대분류)", existing_majors, key="add_exist_maj")
+                    else:
+                        target_maj = st.text_input("새 큰 구분(대분류)명", placeholder="예: 대학발전기금, 장학기금", key="add_new_maj")
+                with u_c2:
+                    st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+                    target_sub = st.text_input("세부 구분(소분류)명", placeholder="예: 시설확충, 학과지정 등", key="add_new_sub")
+
+                if st.button("💾 용도 분류 추가", type="primary", use_container_width=True):
+                    if target_maj.strip() and target_sub.strip():
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        try:
+                            cursor.execute("""
+                                INSERT INTO donation_purposes (entity_type, major_category, sub_category, created_at)
+                                VALUES (?, ?, ?, ?)
+                            """, (current_entity, target_maj.strip(), target_sub.strip(), now_str))
+                            conn.commit()
+                            st.success(f"[{target_maj.strip()} > {target_sub.strip()}] 분류가 추가되었습니다.")
+                        except sqlite3.IntegrityError:
+                            st.warning("이미 존재하는 분류 항목입니다.")
+                        finally:
+                            conn.close()
+                        st.rerun()
+                    else:
+                        st.warning("큰 구분과 세부 구분을 모두 입력해 주세요.")
+
+            # 현재 등록된 분류 테이블 표시 및 삭제/수정
+            conn = get_db_connection()
+            purp_df = pd.read_sql_query("""
+                SELECT id, major_category, sub_category, created_at FROM donation_purposes
+                WHERE entity_type = ? ORDER BY major_category, sub_category
+            """, conn, params=(current_entity,))
+            conn.close()
+
+            if not purp_df.empty:
+                disp_purp = purp_df.copy()
+                disp_purp['연번'] = range(1, len(disp_purp) + 1)
+                st.dataframe(
+                    disp_purp[['연번', 'major_category', 'sub_category', 'created_at']],
+                    use_container_width=True,
+                    height=240,
+                    hide_index=True,
+                    column_config={
+                        "연번": st.column_config.NumberColumn(width=60),
+                        "major_category": st.column_config.TextColumn("큰 구분 (대분류)", width=180),
+                        "sub_category": st.column_config.TextColumn("세부 구분 (소분류)", width=220),
+                        "created_at": st.column_config.TextColumn("등록일시", width=160)
+                    }
+                )
+
+                del_c1, del_c2 = st.columns([4, 1.5])
+                with del_c1:
+                    sel_p_id = st.selectbox(
+                        "관리할 분류 항목 선택",
+                        purp_df['id'].tolist(),
+                        format_func=lambda x: f"[{purp_df[purp_df['id']==x]['major_category'].values[0]}] ➔ {purp_df[purp_df['id']==x]['sub_category'].values[0]}",
+                        key="sel_purp_manage"
+                    )
+                with del_c2:
+                    st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)
+                    if st.button("🗑️ 선택 항목 삭제", type="secondary", use_container_width=True):
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("DELETE FROM donation_purposes WHERE id = ?", (sel_p_id,))
+                        conn.commit()
+                        conn.close()
+                        st.success("해당 용도 분류가 삭제되었습니다.")
+                        st.rerun()
+
+        # ----------------------------------------------------
+        # 2. 정기 기부(약정)자 관리
+        # ----------------------------------------------------
+        else:
+            st.markdown(f"##### 📅 [{entity_label}] 정기 기부(약정)자 명단 등록 및 관리")
+            
+            with st.expander("➕ 새 정기 기부(약정)자 등록", expanded=pledges_df.empty):
+                st.markdown("##### 1. 기부자 기본 정보")
+                pl_col1, pl_col2, pl_col3, pl_col4 = st.columns(4)
+                with pl_col1:
+                    # 교직원(급여공제) ➔ 교직원으로 간소화
+                    pl_cat = st.selectbox("기부자 구분", ["교직원", "일반인", "기업/단체"], key="pl_cat_reg")
+                with pl_col2:
+                    meth_opts = ["급여공제", "직접입금"] if pl_cat == "교직원" else ["직접입금", "급여공제"]
+                    pl_meth = st.selectbox("기부 방식", meth_opts, key="pl_meth_reg")
+                with pl_col3:
+                    pl_name = st.text_input("기부자명 (성명/법인명)", placeholder="예: 김교수, 이직원", key="pl_name_reg")
+                with pl_col4:
+                    pl_raw_id = st.text_input("주민등록번호 / 사업자번호", placeholder="예: 850315-1234567", type="password", help="마스킹 및 암호화 보관됩니다.", key="pl_id_reg")
+
+                st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
+                st.markdown("##### 2. 약정 금액 및 분납 조건")
+                pl_amt1, pl_amt2, pl_amt3 = st.columns(3)
+                with pl_amt1:
+                    # [방법 A] 전체 약정액 천 단위 콤마
+                    pl_tot_str = st.text_input("전체 약정액 (원) [선택] - 엔터", value="0", help="정해진 총액 약정이 있는 경우 입력", key="pl_tot_str")
+                    pl_tot = parse_money(pl_tot_str)
+                    st.caption(f"✓ 전체 약정 인식: **{pl_tot:,} 원**")
+                with pl_amt2:
+                    pl_cnt = st.number_input("분납 횟수 (회)", min_value=0, max_value=240, value=0, help="0 입력 시 무기한 매월 정기 납부", key="pl_cnt_reg")
+                    st.caption("0회: 무기한 정기 납부")
+                with pl_amt3:
+                    # [방법 A] 매월 약정액 천 단위 콤마
+                    calc_monthly_def = format_money(pl_tot // pl_cnt) if (pl_tot > 0 and pl_cnt > 0) else "50,000"
+                    pl_month_str = st.text_input("매월 약정액 (원) [필수] - 엔터", value=calc_monthly_def, key="pl_month_str")
+                    pl_month = parse_money(pl_month_str)
+                    st.caption(f"✓ 매월 약정 인식: **{pl_month:,} 원**")
+
+                st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
+                st.markdown("##### 3. 기본 사용 용도 및 약정 상태")
+                pl_st1, pl_st2 = st.columns([2, 1])
+                with pl_st1:
+                    # 기부 용도 분류 체계와 연동
+                    all_sub_options = []
+                    for maj_k, sub_list in purposes_dict.items():
+                        for s_item in sub_list:
+                            all_sub_options.append(f"{maj_k} - {s_item}")
+                    if not all_sub_options:
+                        all_sub_options = ["대학발전기금" if current_entity == "UNIVERSITY" else "발전기금"]
+                    all_sub_options.append("기타(직접입력)")
+
+                    pl_purp_sel = st.selectbox("기본 사용 용도", all_sub_options, key="pl_purp_sel")
+                    if pl_purp_sel == "기타(직접입력)":
+                        pl_final_purpose = st.text_input("기타 상세 용도 직접 입력", placeholder="예: 지정 장학금", key="pl_purp_cust")
+                    else:
+                        pl_final_purpose = pl_purp_sel
+                with pl_st2:
+                    pl_status = st.selectbox("약정 상태", ["진행중", "일시중지", "약정종료"], key="pl_status_reg")
+
+                if st.button("💾 정기 기부(약정)자 등록", type="primary", use_container_width=True):
+                    if pl_name.strip() and pl_month > 0:
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        cursor.execute("""
+                            INSERT INTO donation_pledges (
+                                entity_type, donor_category, payment_method, donor_name,
+                                id_number_masked, id_number_cipher, total_pledge_amt, installment_count,
+                                monthly_amt, default_purpose, status, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            current_entity, pl_cat, pl_meth, pl_name.strip(),
+                            mask_id_number(pl_raw_id), simple_encrypt(pl_raw_id),
+                            float(pl_tot), int(pl_cnt), float(pl_month),
+                            pl_final_purpose.strip() or "일반", pl_status, now_str
+                        ))
+                        conn.commit()
+                        conn.close()
+                        st.success(f"[{pl_name}] 님의 매월 {pl_month:,}원 정기 약정이 등록되었습니다!")
+                        st.rerun()
+                    else:
+                        st.warning("기부자명과 매월 약정액을 정확히 입력해 주세요.")
+
+            # 당월 기부금 일괄 생성기
+            st.markdown("---")
+            st.markdown(f"##### ⚡ [{current_year} 회계연도] 당월 정기 기부금(급여공제분) 일괄 수입 생성")
+            
+            active_pledges = pledges_df[pledges_df['status'] == '진행중'].copy() if not pledges_df.empty else pd.DataFrame()
+
+            if not active_pledges.empty:
+                bat_c1, bat_c2, bat_c3 = st.columns([2, 2, 2])
+                with bat_c1:
+                    batch_date = st.date_input("당월 기부(급여공제) 일자", datetime.now(), key="batch_donation_date")
+                with bat_c2:
+                    batch_filter = st.selectbox("대상 구분 필터", ["전체 진행중 약정자", "교직원만", "직접입금자만"], key="batch_filter")
+                with bat_c3:
+                    batch_budget = st.selectbox("일괄 적용 예산과목", ["일반기부금", "지정기부금"], key="batch_budget")
+
+                filtered_pledges = active_pledges
+                if batch_filter == "교직원만":
+                    filtered_pledges = active_pledges[active_pledges['donor_category'] == '교직원']
+                elif batch_filter == "직접입금자만":
+                    filtered_pledges = active_pledges[active_pledges['payment_method'] == '직접입금']
+
+                st.markdown(f"""
+                <div class="total-banner">
+                    <div>
+                        <span style="font-size:14px; font-weight:700; color:#1E3A8A;">📋 생성 대상 집계:</span>
+                        <span style="font-size:13.5px; color:#475569; margin-left:8px;">총 <b>{len(filtered_pledges)}</b> 명 선택됨</span>
+                    </div>
+                    <div>
+                        <span style="font-size:15px; font-weight:700; color:#1D4ED8;">일괄 수입 예정액: {filtered_pledges['monthly_amt'].sum():,.0f} 원</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                disp_p_df = filtered_pledges[['donor_name', 'donor_category', 'payment_method', 'monthly_amt', 'default_purpose', 'id_number_masked']].copy()
+                disp_p_df.columns = ['기부자명', '기부자 구분', '기부방식', '당월공제액(원)', '사용용도', '식별번호']
+                st.dataframe(
+                    disp_p_df,
+                    use_container_width=True,
+                    height=200,
+                    hide_index=True,
+                    column_config={
+                        "당월공제액(원)": st.column_config.NumberColumn(format="%,d")
+                    }
+                )
+
+                if st.button(f"🚀 위 {len(filtered_pledges)}명 당월 기부금 수입으로 일괄 생성 확정", type="primary", use_container_width=True):
+                    if not filtered_pledges.empty:
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        base_rec_no = generate_receipt_no(current_entity, current_year)
+                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                        created_count = 0
+                        for idx, (_, row) in enumerate(filtered_pledges.iterrows()):
+                            cur_no = generate_next_receipt_no_from_base(base_rec_no, offset=idx)
+                            d_main = "개인" if row['donor_category'] in ["교직원", "일반인"] else "기업체"
+                            d_sub = row['donor_category']
+                            is_stat_val = 1 if (current_entity == "FOUNDATION" and "법정부담금" in row['default_purpose']) else 0
+
+                            cursor.execute("""
+                                INSERT INTO donation_receipts (
+                                    entity_type, fiscal_year, donation_date, budget_subject, purpose,
+                                    donor_main_type, donor_sub_type, donor_name,
+                                    id_number_masked, id_number_cipher, donation_type,
+                                    code, amount, receipt_no, receipt_date, is_statutory_transfer, created_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                current_entity, current_year, str(batch_date), batch_budget, row['default_purpose'],
+                                d_main, d_sub, row['donor_name'],
+                                row['id_number_masked'], row['id_number_cipher'], "금전",
+                                "10", float(row['monthly_amt']), cur_no, str(batch_date), is_stat_val, now_str
+                            ))
+                            created_count += 1
+
+                        conn.commit()
+                        conn.close()
+                        st.success(f"🎉 총 {created_count}명의 정기 기부금(합계: {filtered_pledges['monthly_amt'].sum():,.0f}원)이 {current_year}년 수입으로 일괄 등록되었습니다!")
+                        st.rerun()
+                    else:
+                        st.warning("선택된 대상자가 없습니다.")
+            else:
+                st.info("현재 등록된 '진행중' 약정자가 없습니다. 상단에서 약정자를 먼저 등록해 주세요.")
+
+            # 전체 약정자 목록 대장
+            st.markdown("---")
+            st.markdown("##### 📋 전체 정기 기부(약정)자 명단 대장")
+            if not pledges_df.empty:
+                pledge_table = pledges_df.copy()
+                pledge_table['연번'] = range(1, len(pledge_table) + 1)
+                st.dataframe(
+                    pledge_table[['연번', 'donor_name', 'donor_category', 'payment_method', 'total_pledge_amt', 'installment_count', 'monthly_amt', 'default_purpose', 'status']],
+                    use_container_width=True,
+                    height=220,
+                    hide_index=True,
+                    column_config={
+                        "연번": st.column_config.NumberColumn(width=60),
+                        "donor_name": st.column_config.TextColumn("기부자명", width=110),
+                        "donor_category": st.column_config.TextColumn("기부자 구분", width=100),
+                        "payment_method": st.column_config.TextColumn("기부방식", width=90),
+                        "total_pledge_amt": st.column_config.NumberColumn("전체약정액 (원)", format="%,d", width=120),
+                        "installment_count": st.column_config.NumberColumn("분납횟수", width=80),
+                        "monthly_amt": st.column_config.NumberColumn("매월약정액 (원)", format="%,d", width=120),
+                        "default_purpose": st.column_config.TextColumn("기본용도", width=140),
+                        "status": st.column_config.TextColumn("상태", width=80)
+                    }
+                )
+
+                pl_ctrl1, pl_ctrl2, pl_ctrl3 = st.columns([3, 1.5, 1.5])
+                with pl_ctrl1:
+                    sel_pledge_id = st.selectbox(
+                        "약정 상태 변경 대상 선택",
+                        pledges_df['id'].tolist(),
+                        format_func=lambda x: f"[{pledges_df[pledges_df['id']==x]['donor_category'].values[0]}] {pledges_df[pledges_df['id']==x]['donor_name'].values[0]} 님 (월 {pledges_df[pledges_df['id']==x]['monthly_amt'].values[0]:,.0f}원 / 현재: {pledges_df[pledges_df['id']==x]['status'].values[0]})",
+                        key="sel_pl_action"
+                    )
+                with pl_ctrl2:
+                    new_st = st.selectbox("변경할 상태", ["진행중", "일시중지", "약정종료"], key="new_st_choice")
+                    if st.button("상태 갱신", use_container_width=True):
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE donation_pledges SET status = ? WHERE id = ?", (new_st, sel_pledge_id))
+                        conn.commit()
+                        conn.close()
+                        st.success("약정 상태가 변경되었습니다.")
+                        st.rerun()
+                with pl_ctrl3:
+                    st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)
+                    if st.button("🗑️ 약정자 삭제", type="secondary", use_container_width=True):
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("DELETE FROM donation_pledges WHERE id = ?", (sel_pledge_id,))
+                        conn.commit()
+                        conn.close()
+                        st.success("약정자가 삭제되었습니다.")
+                        st.rerun()
+            else:
+                st.caption("등록된 약정자가 없습니다.")
 
 # ==========================================
 # PAGE 4: 📊 결산 데이터 스마트 검증기
