@@ -92,15 +92,14 @@ st.markdown("""
         background: none !important;
     }
 
-    /* 탭 글씨 크기를 조금 더 키움 */
+    /* 탭 글씨 크기를 키움 */
     button[data-baseweb="tab"] {
-        font-size: 18px !important;
+        font-size: 19px !important;
         font-weight: 700 !important;
-        padding-top: 12px !important;
-        padding-bottom: 12px !important;
+        padding-top: 14px !important;
+        padding-bottom: 14px !important;
     }
 
-    /* 그리드 카드 크기 적당히 슬림하게 조절 */
     .equal-card-container {
         display: flex;
         flex-direction: column;
@@ -319,10 +318,6 @@ def init_db():
             INSERT INTO entity_info (entity_type, org_name, biz_no, address, law_basis, updated_at)
             VALUES ('FOUNDATION', '학교법인 OO학원', '123-82-99999', '경상북도 영천시 대학로 123', '「법인세법」 제24조제2항제1호라목', ?)
         """, (now_str,))
-
-    # 대학 기부금 수입 전체 초기화
-    cursor.execute("DELETE FROM donation_expenses WHERE entity_type = 'UNIVERSITY'")
-    cursor.execute("DELETE FROM donation_receipts WHERE entity_type = 'UNIVERSITY'")
 
     conn.commit()
     conn.close()
@@ -823,6 +818,8 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     assigned_rec_no = edit_row['receipt_no'] if is_edit_mode else "미발급"
                     existing_addr = edit_row['donor_address'] if is_edit_mode else ""
+                    # 등록일자의 연도를 fiscal_year로 반영하여 해당 연도 수입대장에 확실히 나타나도록 함
+                    f_year_val = d_date.year
 
                     conn = get_db_connection()
                     cursor = conn.cursor()
@@ -830,14 +827,14 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     if is_edit_mode:
                         cursor.execute("""
                             UPDATE donation_receipts SET
-                                donation_date = ?, budget_subject = ?, purpose = ?,
+                                fiscal_year = ?, donation_date = ?, budget_subject = ?, purpose = ?,
                                 donor_main_type = ?, donor_sub_type = ?, donor_name = ?,
                                 id_number_masked = ?, id_number_cipher = ?, donation_type = ?,
                                 code = ?, amount = ?, receipt_date = ?, 
                                 goods_name = ?, goods_qty = ?, goods_unit_price = ?, is_statutory_transfer = ?
                             WHERE id = ?
                         """, (
-                            str(d_date), budget_subj, final_purpose.strip() or "일반",
+                            f_year_val, str(d_date), budget_subj, final_purpose.strip() or "일반",
                             d_main_type, d_sub_type, donor_name.strip(),
                             masked_id, stored_cipher_id, d_type,
                             d_code.strip(), float(d_amt), str(d_date),
@@ -860,7 +857,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                                 goods_name, goods_qty, goods_unit_price, is_statutory_transfer, created_at
                             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
-                            current_entity, current_year, str(d_date), budget_subj, final_purpose.strip() or "일반",
+                            current_entity, f_year_val, str(d_date), budget_subj, final_purpose.strip() or "일반",
                             d_main_type, d_sub_type, donor_name.strip(),
                             masked_id, stored_cipher_id, d_type,
                             d_code.strip(), float(d_amt), assigned_rec_no, str(d_date), existing_addr,
@@ -871,7 +868,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                         conn.close()
                         
                         st.session_state.selected_receipt_id_for_expense = new_receipt_id
-                        st.success(f"[{current_year}년 {donor_name}] 님의 기부금 ({d_amt:,.0f}원) 등록 완료!")
+                        st.success(f"[{f_year_val}년 {donor_name}] 님의 기부금 ({d_amt:,.0f}원) 등록 완료!")
                         st.rerun()
                 else:
                     st.warning("기부자 성명과 기부 금액을 올바르게 입력해 주세요.")
@@ -1273,7 +1270,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     st.success("발급번호가 저장되었습니다!")
                     st.rerun()
 
-            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (중앙정렬 및 금액 칸 통폐합 완벽 반영)
+            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어
             with right_col:
                 st.markdown("##### 2. 기부금 영수증 법정 서식 뷰어")
                 
@@ -1337,7 +1334,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                         curr_addr = first_item['donor_address'] if first_item['donor_address'] else "-"
                         rep_rec_no = first_item['receipt_no']
 
-                        # [요청 반영] 현물 기부 품명/수량/단가 반영 및 금액 칸 통폐합
                         donation_rows_html = ""
                         for _, d_row in group_df.iterrows():
                             is_goods = (d_row["donation_type"] == "현물")
@@ -1757,7 +1753,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
 
                 st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
                 
-                # [요청 반영] 정기 약정 등록 시 예산과목 / 대분류 / 소분류 계층형 입력 적용
                 st.markdown("##### 3. 기본 사용 용도 (예산과목 ➔ 대분류 ➔ 소분류) 및 약정 상태")
                 pl_bs_c1, pl_bs_c2, pl_bs_c3 = st.columns([1.5, 2, 2.5])
                 with pl_bs_c1:
@@ -1854,8 +1849,9 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                 </div>
                 """, unsafe_allow_html=True)
 
-                disp_p_df = filtered_pledges[['donor_name', 'donor_category', 'payment_method', 'monthly_amt', 'default_purpose', 'id_number_masked']].copy()
-                disp_p_df.columns = ['기부자명', '기부자 구분', '기부방식', f'{chosen_month}월공제액(원)', '사용용도', '식별번호']
+                # [요청 반영] 생성목록에 예산과목(지정기부금/일반기부금) 컬럼 표시
+                disp_p_df = filtered_pledges[['donor_name', 'donor_category', 'payment_method', 'budget_subject', 'monthly_amt', 'default_purpose', 'id_number_masked']].copy()
+                disp_p_df.columns = ['기부자명', '기부자 구분', '기부방식', '예산과목', f'{chosen_month}월공제액(원)', '사용용도', '식별번호']
                 st.dataframe(
                     disp_p_df,
                     use_container_width=True,
@@ -1874,6 +1870,8 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
 
                         created_count = 0
                         total_batch_amt = filtered_pledges['monthly_amt'].sum()
+                        f_year_val = batch_date.year
+
                         for idx, (_, row) in enumerate(filtered_pledges.iterrows()):
                             d_main = "개인" if row['donor_category'] in ["교직원", "일반인"] else "기업체"
                             d_sub = row['donor_category']
@@ -1888,7 +1886,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                                     code, amount, receipt_no, receipt_date, donor_address, is_statutory_transfer, created_at
                                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, (
-                                current_entity, current_year, str(batch_date), p_subj, row['default_purpose'],
+                                current_entity, f_year_val, str(batch_date), p_subj, row['default_purpose'],
                                 d_main, d_sub, row['donor_name'],
                                 row['id_number_masked'], row['id_number_cipher'], "금전",
                                 "10", float(row['monthly_amt']), "미발급", str(batch_date), "", is_stat_val, now_str
@@ -1897,7 +1895,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
 
                         conn.commit()
                         conn.close()
-                        show_batch_success_modal(chosen_month, created_count, total_batch_amt, current_year)
+                        show_batch_success_modal(chosen_month, created_count, total_batch_amt, f_year_val)
                     else:
                         st.warning("선택된 대상자가 없습니다.")
             else:
