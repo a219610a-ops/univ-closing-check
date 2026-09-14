@@ -252,36 +252,17 @@ def init_db():
 
     cursor.execute("PRAGMA table_info(donation_receipts)")
     r_cols = [c[1] for c in cursor.fetchall()]
-    if "donor_address" not in r_cols:
-        try: cursor.execute("ALTER TABLE donation_receipts ADD COLUMN donor_address TEXT DEFAULT ''")
-        except Exception: pass
-    if "goods_name" not in r_cols:
-        try: cursor.execute("ALTER TABLE donation_receipts ADD COLUMN goods_name TEXT DEFAULT ''")
-        except Exception: pass
-    if "goods_qty" not in r_cols:
-        try: cursor.execute("ALTER TABLE donation_receipts ADD COLUMN goods_qty TEXT DEFAULT ''")
-        except Exception: pass
-    if "goods_unit_price" not in r_cols:
-        try: cursor.execute("ALTER TABLE donation_receipts ADD COLUMN goods_unit_price TEXT DEFAULT ''")
-        except Exception: pass
+    for col, default_val in [("donor_address", ""), ("goods_name", ""), ("goods_qty", ""), ("goods_unit_price", ""), ("is_statutory_transfer", 0)]:
+        if col not in r_cols:
+            try: cursor.execute(f"ALTER TABLE donation_receipts ADD COLUMN {col} DEFAULT '{default_val}'")
+            except Exception: pass
 
     cursor.execute("PRAGMA table_info(donation_pledges)")
     pl_cols = [c[1] for c in cursor.fetchall()]
-    if "budget_subject" not in pl_cols:
-        try: cursor.execute("ALTER TABLE donation_pledges ADD COLUMN budget_subject TEXT DEFAULT '일반기부금'")
-        except Exception: pass
-    if "major_category" not in pl_cols:
-        try: cursor.execute("ALTER TABLE donation_pledges ADD COLUMN major_category TEXT DEFAULT ''")
-        except Exception: pass
-    if "sub_category" not in pl_cols:
-        try: cursor.execute("ALTER TABLE donation_pledges ADD COLUMN sub_category TEXT DEFAULT ''")
-        except Exception: pass
-
-    cursor.execute("PRAGMA table_info(donation_purposes)")
-    p_cols = [c[1] for c in cursor.fetchall()]
-    if "budget_subject" not in p_cols:
-        try: cursor.execute("ALTER TABLE donation_purposes ADD COLUMN budget_subject TEXT DEFAULT '일반기부금'")
-        except Exception: pass
+    for col, default_val in [("budget_subject", "일반기부금"), ("major_category", ""), ("sub_category", "")]:
+        if col not in pl_cols:
+            try: cursor.execute(f"ALTER TABLE donation_pledges ADD COLUMN {col} DEFAULT '{default_val}'")
+            except Exception: pass
 
     cursor.execute("SELECT COUNT(*) FROM donation_purposes")
     if cursor.fetchone()[0] == 0:
@@ -317,10 +298,6 @@ def init_db():
             INSERT INTO entity_info (entity_type, org_name, biz_no, address, law_basis, updated_at)
             VALUES ('FOUNDATION', '학교법인 OO학원', '123-82-99999', '경상북도 영천시 대학로 123', '「법인세법」 제24조제2항제1호라목', ?)
         """, (now_str,))
-
-    # 대학 기부금 수입 전체 초기화
-    cursor.execute("DELETE FROM donation_expenses WHERE entity_type = 'UNIVERSITY'")
-    cursor.execute("DELETE FROM donation_receipts WHERE entity_type = 'UNIVERSITY'")
 
     conn.commit()
     conn.close()
@@ -1290,7 +1267,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     st.success("발급번호가 저장되었습니다!")
                     st.rerun()
 
-            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (현물 품명/수량/단가 및 금전 1줄 단일 행 완벽 구현)
+            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (중간 합계 행 없음, 현물 품명/수량/단가 및 금전 1줄 공란 완벽 반영)
             with right_col:
                 st.markdown("##### 2. 기부금 영수증 법정 서식 뷰어")
                 
@@ -1472,12 +1449,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         <tr>
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">품명</th>
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">내용</th>
-        </tr>
-        <tr>
-            <th colspan="3" style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">합 계 금 액</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">수량</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">단가</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">금액</th>
         </tr>
         {donation_rows_html}
         <tr>
