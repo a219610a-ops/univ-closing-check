@@ -318,6 +318,10 @@ def init_db():
             VALUES ('FOUNDATION', '학교법인 OO학원', '123-82-99999', '경상북도 영천시 대학로 123', '「법인세법」 제24조제2항제1호라목', ?)
         """, (now_str,))
 
+    # 대학 기부금 수입 전체 초기화
+    cursor.execute("DELETE FROM donation_expenses WHERE entity_type = 'UNIVERSITY'")
+    cursor.execute("DELETE FROM donation_receipts WHERE entity_type = 'UNIVERSITY'")
+
     conn.commit()
     conn.close()
 
@@ -1093,7 +1097,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             st.info(f"{current_year} 회계연도에 등록된 기부금 수입이 없습니다. 상단에서 기부금을 먼저 등록해 주세요.")
 
     # ==========================================
-    # TAB 2: 📊 사용 용도별 집행 정산표 (예산과목 맨 앞 추가)
+    # TAB 2: 📊 사용 용도별 집행 정산표
     # ==========================================
     with tab_stmt:
         st.markdown(f"#### 📊 [{current_year} 회계연도] 사용 용도별 집행 정산표")
@@ -1287,7 +1291,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     st.success("발급번호가 저장되었습니다!")
                     st.rerun()
 
-            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어
+            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (공식 헤더 3단 구조 반영: 품명/수량/단가 완벽 지원)
             with right_col:
                 st.markdown("##### 2. 기부금 영수증 법정 서식 뷰어")
                 
@@ -1351,6 +1355,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                         curr_addr = first_item['donor_address'] if first_item['donor_address'] else "-"
                         rep_rec_no = first_item['receipt_no']
 
+                        # [요청 반영] 현물일 때 품명, 내용(목적), 수량, 단가가 2단 행으로 정확히 매핑되도록 구현 (금전일 경우 1줄 단일 행 및 공란)
                         donation_rows_html = ""
                         for _, d_row in group_df.iterrows():
                             is_goods = (d_row["donation_type"] == "현물")
@@ -1469,6 +1474,12 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         <tr>
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">품명</th>
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">내용</th>
+        </tr>
+        <tr>
+            <th colspan="3" style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">합 계 금 액</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">수량</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">단가</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">금액</th>
         </tr>
         {donation_rows_html}
         <tr>
