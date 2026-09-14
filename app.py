@@ -92,18 +92,20 @@ st.markdown("""
         background: none !important;
     }
 
+    /* 탭 글씨 크기를 조금 더 키움 */
     button[data-baseweb="tab"] {
-        font-size: 16px !important;
+        font-size: 18px !important;
         font-weight: 700 !important;
-        padding-top: 10px !important;
-        padding-bottom: 10px !important;
+        padding-top: 12px !important;
+        padding-bottom: 12px !important;
     }
 
+    /* 그리드 카드 크기 적당히 슬림하게 조절 */
     .equal-card-container {
         display: flex;
         flex-direction: column;
         height: 100%;
-        padding: 4px;
+        padding: 2px;
         justify-content: flex-start;
     }
 </style>
@@ -683,7 +685,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
     ])
 
     # ==========================================
-    # TAB 1: 📥 기부금 관리 (현물 품명/수량/단가 입력 지원)
+    # TAB 1: 📥 기부금 관리
     # ==========================================
     with tab_manage:
         edit_row = None
@@ -785,12 +787,11 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                 def_t_idx = t_opts.index(edit_row['donation_type']) if is_edit_mode and edit_row['donation_type'] in t_opts else (1 if budget_subj == "현물기부금" else 0)
                 d_type = st.selectbox("내용 구분 (금전/현물)", t_opts, index=def_t_idx, key=f"dt_{current_year}_{is_edit_mode}")
 
-            # [요청 반영] 현물 기부 시 품명, 수량, 단가 추가 입력 필드 활성화
             goods_name_input = ""
             goods_qty_input = ""
             goods_price_input = ""
             if d_type == "현물":
-                st.markdown("##### 3. 현물 상세 기재 사항 (법정 서식 반영)")
+                st.markdown("##### 3. 현물 상세 기재 사항")
                 g_col1, g_col2, g_col3 = st.columns(3)
                 with g_col1:
                     goods_name_input = st.text_input("품명", value=edit_row['goods_name'] if is_edit_mode and 'goods_name' in edit_row else "", placeholder="예: 실습용 PC", key=f"g_name_{current_year}_{is_edit_mode}")
@@ -1142,7 +1143,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         )
 
     # ==========================================
-    # TAB 3: 📑 기부영수증 발급 (성명 중앙정렬 및 금액칸 통폐합 반영)
+    # TAB 3: 📑 기부영수증 발급
     # ==========================================
     with tab_official:
         st.markdown(f"#### 📑 [{current_year} 회계연도] 기부영수증 발급 (법인세법 시행규칙 별지 제63호의3서식)")
@@ -1272,7 +1273,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     st.success("발급번호가 저장되었습니다!")
                     st.rerun()
 
-            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (중앙정렬 및 금액 통폐합 반영)
+            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (중앙정렬 및 금액 칸 통폐합 완벽 반영)
             with right_col:
                 st.markdown("##### 2. 기부금 영수증 법정 서식 뷰어")
                 
@@ -1336,7 +1337,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                         curr_addr = first_item['donor_address'] if first_item['donor_address'] else "-"
                         rep_rec_no = first_item['receipt_no']
 
-                        # [요청 반영] 현물일 때만 품명/수량/단가 반영, 금액은 우측 정렬 통폐합
+                        # [요청 반영] 현물 기부 품명/수량/단가 반영 및 금액 칸 통폐합
                         donation_rows_html = ""
                         for _, d_row in group_df.iterrows():
                             is_goods = (d_row["donation_type"] == "현물")
