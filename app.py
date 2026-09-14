@@ -318,10 +318,6 @@ def init_db():
             VALUES ('FOUNDATION', '학교법인 OO학원', '123-82-99999', '경상북도 영천시 대학로 123', '「법인세법」 제24조제2항제1호라목', ?)
         """, (now_str,))
 
-    # 대학 기부금 수입 전체 초기화
-    cursor.execute("DELETE FROM donation_expenses WHERE entity_type = 'UNIVERSITY'")
-    cursor.execute("DELETE FROM donation_receipts WHERE entity_type = 'UNIVERSITY'")
-
     conn.commit()
     conn.close()
 
@@ -975,6 +971,20 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                 }
             )
 
+            # [요청 반영] 기부금 수입 대장 및 관리 엑셀 다운로드 기능 추가
+            buf_ledger = io.BytesIO()
+            with pd.ExcelWriter(buf_ledger, engine='openpyxl') as writer:
+                summary_table_df.drop(columns=['수입ID']).to_excel(writer, index=False, sheet_name=f"{current_year}년_기부금수입대장")
+            buf_ledger.seek(0)
+
+            st.download_button(
+                label=f"📥 [{entity_label} {current_year}년] 기부금 수입 대장(.xlsx) 다운로드",
+                data=buf_ledger,
+                file_name=f"기부금수입대장_{current_entity}_{current_year}년.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
             ctrl_c1, ctrl_c2, ctrl_c3 = st.columns([4, 1.2, 1.2])
             with ctrl_c1:
                 sel_r_id = st.selectbox(
@@ -1083,27 +1093,30 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             st.info(f"{current_year} 회계연도에 등록된 기부금 수입이 없습니다. 상단에서 기부금을 먼저 등록해 주세요.")
 
     # ==========================================
-    # TAB 2: 📊 사용 용도별 집행 정산표
+    # TAB 2: 📊 사용 용도별 집행 정산표 (예산과목 구분 맨 앞 추가)
     # ==========================================
     with tab_stmt:
         st.markdown(f"#### 📊 [{current_year} 회계연도] 사용 용도별 집행 정산표")
-        st.caption(f"{current_year} 회계연도에 접수된 기부금의 용도별 총 수입, 지출, 잔액 및 집행률을 결산합니다.")
+        st.caption(f"{current_year} 회계연도에 접수된 기부금의 예산과목별·용도별 총 수입, 지출, 잔액 및 집행률을 결산합니다.")
 
-        inc_p = receipts_df.groupby('purpose')['amount'].sum().reset_index() if not receipts_df.empty else pd.DataFrame(columns=['purpose', 'amount'])
-        
+        if not receipts_df.empty:
+            inc_p = receipts_df.groupby(['budget_subject', 'purpose'], as_index=False)['amount'].sum()
+        else:
+            inc_p = pd.DataFrame(columns=['budget_subject', 'purpose', 'amount'])
+
         if not expenses_df.empty and not receipts_df.empty:
             exp_merged = pd.merge(
                 expenses_df[['receipt_id', 'amount']], 
-                receipts_df[['id', 'purpose']], 
+                receipts_df[['id', 'budget_subject', 'purpose']], 
                 left_on='receipt_id', 
                 right_on='id', 
                 how='left'
             )
-            exp_p = exp_merged.groupby('purpose', as_index=False)['amount'].sum()
+            exp_p = exp_merged.groupby(['budget_subject', 'purpose'], as_index=False)['amount'].sum()
         else:
-            exp_p = pd.DataFrame(columns=['purpose', 'amount'])
+            exp_p = pd.DataFrame(columns=['budget_subject', 'purpose', 'amount'])
 
-        statement_df = pd.merge(inc_p, exp_p, on='purpose', how='outer', suffixes=('_수입', '_지출')).fillna(0)
+        statement_df = pd.merge(inc_p, exp_p, on=['budget_subject', 'purpose'], how='outer', suffixes=('_수입', '_지출')).fillna(0)
         if 'amount_수입' not in statement_df.columns: statement_df['amount_수입'] = 0.0
         if 'amount_지출' not in statement_df.columns: statement_df['amount_지출'] = 0.0
 
@@ -1112,18 +1125,20 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             lambda row: round((row['amount_지출'] / row['amount_수입'] * 100), 1) if row['amount_수입'] > 0 else 0.0, 
             axis=1
         )
-        statement_df = statement_df[['purpose', 'amount_수입', 'amount_지출', '집행잔액', '집행률(%)']]
-        statement_df.columns = ['사용 용도', '수입 총액 (원)', '지출 총액 (원)', '집행 잔액 (원)', '집행률 (%)']
+        statement_df = statement_df[['budget_subject', 'purpose', 'amount_수입', 'amount_지출', '집행잔액', '집행률(%)']]
+        statement_df.columns = ['예산과목', '사용 용도', '수입 총액 (원)', '지출 총액 (원)', '집행 잔액 (원)', '집행률 (%)']
 
         st.dataframe(
             statement_df,
             use_container_width=True,
             hide_index=True,
             column_config={
-                '수입 총액 (원)': st.column_config.NumberColumn(format="%,d"),
-                '지출 총액 (원)': st.column_config.NumberColumn(format="%,d"),
-                '집행 잔액 (원)': st.column_config.NumberColumn(format="%,d"),
-                '집행률 (%)': st.column_config.NumberColumn(format="%.1f%%")
+                '예산과목': st.column_config.TextColumn("예산과목", width=120),
+                '사용 용도': st.column_config.TextColumn("사용 용도", width=200),
+                '수입 총액 (원)': st.column_config.NumberColumn(format="%,d", width=130),
+                '지출 총액 (원)': st.column_config.NumberColumn(format="%,d", width=130),
+                '집행 잔액 (원)': st.column_config.NumberColumn(format="%,d", width=130),
+                '집행률 (%)': st.column_config.NumberColumn(format="%.1f%%", width=100)
             }
         )
 
@@ -1272,7 +1287,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     st.success("발급번호가 저장되었습니다!")
                     st.rerun()
 
-            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (금전 기부 시 1줄 단일 행 및 내용란 공란 정밀 적용)
+            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어
             with right_col:
                 st.markdown("##### 2. 기부금 영수증 법정 서식 뷰어")
                 
@@ -1336,7 +1351,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                         curr_addr = first_item['donor_address'] if first_item['donor_address'] else "-"
                         rep_rec_no = first_item['receipt_no']
 
-                        # [요청 반영] 금전 기부 시 단일 행 1줄 출력 및 내용란 완전 공란 처리 (현물일 때만 품명/수량/단가 2단 행 적용)
                         donation_rows_html = ""
                         for _, d_row in group_df.iterrows():
                             is_goods = (d_row["donation_type"] == "현물")
@@ -1455,6 +1469,12 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         <tr>
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">품명</th>
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">내용</th>
+        </tr>
+        <tr>
+            <th colspan="3" style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">합 계 금 액</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">수량</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">단가</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">금액</th>
         </tr>
         {donation_rows_html}
         <tr>
