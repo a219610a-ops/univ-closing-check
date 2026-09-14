@@ -818,7 +818,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     assigned_rec_no = edit_row['receipt_no'] if is_edit_mode else "미발급"
                     existing_addr = edit_row['donor_address'] if is_edit_mode else ""
-                    # 등록일자의 연도를 fiscal_year로 반영하여 해당 연도 수입대장에 확실히 나타나도록 함
                     f_year_val = d_date.year
 
                     conn = get_db_connection()
@@ -1270,7 +1269,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     st.success("발급번호가 저장되었습니다!")
                     st.rerun()
 
-            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어
+            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (리스트 왜곡 방지 및 금전 기부 내용 공란 완벽 적용)
             with right_col:
                 st.markdown("##### 2. 기부금 영수증 법정 서식 뷰어")
                 
@@ -1303,7 +1302,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
     .receipt-header { text-align: center; border-bottom: 1.5px solid #000; padding-bottom: 8px; margin-bottom: 12px; }
     .receipt-title { font-size: 22px; font-weight: 800; letter-spacing: 5px; }
     .receipt-table { width: 100%; border-collapse: collapse; margin-bottom: 10px; font-size: 11px; background: #FFF; table-layout: fixed; }
-    .receipt-table th, .receipt-table td { border: 1px solid #000; padding: 5px 6px; background: #FFF; word-break: break-all; text-align: center; }
+    .receipt-table th, .receipt-table td { border: 1px solid #000; padding: 5px 6px; background: #FFF; word-break: break-all; text-align: center; vertical-align: middle; }
     .receipt-table th { font-weight: 600; }
     .stamp-box { display: inline-block; width: 65px; height: 65px; border: 1px dashed #94A3B8; vertical-align: middle; line-height: 65px; text-align: center; font-size: 10px; color: #64748B; margin-left: 8px; }
     @media print {
@@ -1334,27 +1333,29 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                         curr_addr = first_item['donor_address'] if first_item['donor_address'] else "-"
                         rep_rec_no = first_item['receipt_no']
 
+                        # [요청 반영] 금전일 경우 내용란 공란 처리, 현물일 경우 품명·수량·단가 정상 반영
                         donation_rows_html = ""
                         for _, d_row in group_df.iterrows():
                             is_goods = (d_row["donation_type"] == "현물")
-                            item_name_val = d_row["goods_name"] if (is_goods and 'goods_name' in d_row and d_row["goods_name"]) else ("기부금" if not is_goods else "&nbsp;")
-                            item_desc_val = d_row["purpose"] if is_goods else d_row["purpose"]
+                            item_name_val = d_row["goods_name"] if (is_goods and 'goods_name' in d_row and d_row["goods_name"]) else "&nbsp;"
+                            # 금전 기부일 경우 내용란이 비어있도록 공란 처리
+                            item_desc_val = d_row["purpose"] if is_goods else "&nbsp;"
                             item_qty_val = d_row["goods_qty"] if (is_goods and 'goods_qty' in d_row and d_row["goods_qty"]) else "&nbsp;"
                             item_price_val = d_row["goods_unit_price"] if (is_goods and 'goods_unit_price' in d_row and d_row["goods_unit_price"]) else "&nbsp;"
                             row_amt_str = f"{int(d_row['amount']):,}"
 
                             donation_rows_html += (
                                 f'<tr>'
-                                f'<td rowspan="2" style="border:1px solid #000; padding:5px; vertical-align:middle;">{d_row["code"]}</td>'
-                                f'<td rowspan="2" style="border:1px solid #000; padding:5px; vertical-align:middle;">{d_row["donation_type"]}</td>'
-                                f'<td rowspan="2" style="border:1px solid #000; padding:5px; vertical-align:middle;">{d_row["donation_date"]}</td>'
-                                f'<td style="border:1px solid #000; padding:5px;">{item_name_val}</td>'
-                                f'<td style="border:1px solid #000; padding:5px;">{item_desc_val}</td>'
+                                f'<td rowspan="2" style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{d_row["code"]}</td>'
+                                f'<td rowspan="2" style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{d_row["donation_type"]}</td>'
+                                f'<td rowspan="2" style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{d_row["donation_date"]}</td>'
+                                f'<td style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{item_name_val}</td>'
+                                f'<td style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{item_desc_val}</td>'
                                 f'<td rowspan="2" style="border:1px solid #000; padding:5px; text-align:right; font-weight:700; vertical-align:middle;">{row_amt_str}</td>'
                                 f'</tr>'
                                 f'<tr>'
-                                f'<td style="border:1px solid #000; padding:5px;">{item_qty_val}</td>'
-                                f'<td style="border:1px solid #000; padding:5px;">{item_price_val}</td>'
+                                f'<td style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{item_qty_val}</td>'
+                                f'<td style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{item_price_val}</td>'
                                 f'</tr>'
                             )
 
@@ -1367,8 +1368,8 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
     <div style="margin-bottom:8px;">
         <table style="border-collapse:collapse; font-size:11px;">
             <tr>
-                <th style="border:1px solid #000; padding:3px 8px; background:#FFF; font-weight:700;">일련번호</th>
-                <td style="border:1px solid #000; padding:3px 12px; background:#FFF; font-weight:800; font-family:monospace; text-align:center;">{rep_rec_no}</td>
+                <th style="border:1px solid #000; padding:3px 8px; background:#FFF; font-weight:700; text-align:center; vertical-align:middle;">일련번호</th>
+                <td style="border:1px solid #000; padding:3px 12px; background:#FFF; font-weight:800; font-family:monospace; text-align:center; vertical-align:middle;">{rep_rec_no}</td>
             </tr>
         </table>
     </div>
@@ -1378,78 +1379,78 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
     <div style="font-size:12px; font-weight:700; margin:6px 0 3px 0;">● 기부자</div>
     <table class="receipt-table" style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:11px; background:#FFF;">
         <tr>
-            <th style="border:1px solid #000; background:#FFF; padding:5px; width:22%;">성명(법인명)</th>
-            <td style="border:1px solid #000; padding:5px; width:28%; font-weight:700;">{first_item["donor_name"]}</td>
-            <th style="border:1px solid #000; background:#FFF; padding:5px; width:25%;">주민등록번호<br>(사업자등록번호)</th>
-            <td style="border:1px solid #000; padding:5px; width:25%; font-family:monospace; font-weight:600;">{display_id}</td>
+            <th style="border:1px solid #000; background:#FFF; padding:5px; width:22%; text-align:center; vertical-align:middle;">성명(법인명)</th>
+            <td style="border:1px solid #000; padding:5px; width:28%; font-weight:700; text-align:center; vertical-align:middle;">{first_item["donor_name"]}</td>
+            <th style="border:1px solid #000; background:#FFF; padding:5px; width:25%; text-align:center; vertical-align:middle;">주민등록번호<br>(사업자등록번호)</th>
+            <td style="border:1px solid #000; padding:5px; width:25%; font-family:monospace; font-weight:600; text-align:center; vertical-align:middle;">{display_id}</td>
         </tr>
         <tr>
-            <th style="border:1px solid #000; background:#FFF; padding:5px;">주소(소재지)</th>
-            <td colspan="3" style="border:1px solid #000; padding:5px;">{curr_addr}</td>
+            <th style="border:1px solid #000; background:#FFF; padding:5px; text-align:center; vertical-align:middle;">주소(소재지)</th>
+            <td colspan="3" style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{curr_addr}</td>
         </tr>
     </table>
     <div style="font-size:12px; font-weight:700; margin:6px 0 3px 0;">● 기부금 단체</div>
     <table class="receipt-table" style="width:100%; border-collapse:collapse; margin-bottom:4px; font-size:11px; background:#FFF;">
         <tr>
-            <th style="border:1px solid #000; background:#FFF; padding:5px; width:22%;">단체명</th>
-            <td style="border:1px solid #000; padding:5px; width:28%; font-weight:600;">{org_name}</td>
-            <th style="border:1px solid #000; background:#FFF; padding:5px; width:25%;">사업자등록번호(고유번호)</th>
-            <td style="border:1px solid #000; padding:5px; width:25%; font-family:monospace;">{org_biz_no}</td>
+            <th style="border:1px solid #000; background:#FFF; padding:5px; width:22%; text-align:center; vertical-align:middle;">단체명</th>
+            <td style="border:1px solid #000; padding:5px; width:28%; font-weight:600; text-align:center; vertical-align:middle;">{org_name}</td>
+            <th style="border:1px solid #000; background:#FFF; padding:5px; width:25%; text-align:center; vertical-align:middle;">사업자등록번호(고유번호)</th>
+            <td style="border:1px solid #000; padding:5px; width:25%; font-family:monospace; text-align:center; vertical-align:middle;">{org_biz_no}</td>
         </tr>
         <tr>
-            <th style="border:1px solid #000; background:#FFF; padding:5px;">(지점명)</th>
-            <td style="border:1px solid #000; padding:5px;">&nbsp;</td>
-            <th style="border:1px solid #000; background:#FFF; padding:5px;">(지점 사업자등록번호 등)</th>
-            <td style="border:1px solid #000; padding:5px;">&nbsp;</td>
+            <th style="border:1px solid #000; background:#FFF; padding:5px; text-align:center; vertical-align:middle;">(지점명)</th>
+            <td style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">&nbsp;</td>
+            <th style="border:1px solid #000; background:#FFF; padding:5px; text-align:center; vertical-align:middle;">(지점 사업자등록번호 등)</th>
+            <td style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">&nbsp;</td>
         </tr>
         <tr>
-            <th style="border:1px solid #000; background:#FFF; padding:5px;">소재지</th>
-            <td style="border:1px solid #000; padding:5px;">{org_addr}</td>
-            <th style="border:1px solid #000; background:#FFF; padding:5px;">기부금공제대상 공익법인등 근거법령</th>
-            <td style="border:1px solid #000; padding:5px; font-size:10.5px;">{org_law}</td>
+            <th style="border:1px solid #000; background:#FFF; padding:5px; text-align:center; vertical-align:middle;">소재지</th>
+            <td style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{org_addr}</td>
+            <th style="border:1px solid #000; background:#FFF; padding:5px; text-align:center; vertical-align:middle;">기부금공제대상 공익법인등 근거법령</th>
+            <td style="border:1px solid #000; padding:5px; font-size:10.5px; text-align:center; vertical-align:middle;">{org_law}</td>
         </tr>
         <tr>
-            <th style="border:1px solid #000; background:#FFF; padding:5px;">(지점 소재지)</th>
-            <td colspan="3" style="border:1px solid #000; padding:5px;">&nbsp;</td>
+            <th style="border:1px solid #000; background:#FFF; padding:5px; text-align:center; vertical-align:middle;">(지점 소재지)</th>
+            <td colspan="3" style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">&nbsp;</td>
         </tr>
     </table>
     <div style="font-size:9.5px; color:#64748B; margin-bottom:8px;">* 기부금 단체의 지점(분사무소)이 기부받은 경우, 지점명 등을 추가로 기재할 수 있습니다.</div>
     <div style="font-size:12px; font-weight:700; margin:6px 0 3px 0;">● 기부금 모집처(언론기관 등)</div>
     <table class="receipt-table" style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:11px; background:#FFF;">
         <tr>
-            <th style="border:1px solid #000; background:#FFF; padding:5px; width:22%;">단체명</th>
-            <td style="border:1px solid #000; padding:5px; width:28%;">&nbsp;</td>
-            <th style="border:1px solid #000; background:#FFF; padding:5px; width:25%;">사업자등록번호</th>
-            <td style="border:1px solid #000; padding:5px; width:25%;">&nbsp;</td>
+            <th style="border:1px solid #000; background:#FFF; padding:5px; width:22%; text-align:center; vertical-align:middle;">단체명</th>
+            <td style="border:1px solid #000; padding:5px; width:28%; text-align:center; vertical-align:middle;">&nbsp;</td>
+            <th style="border:1px solid #000; background:#FFF; padding:5px; width:25%; text-align:center; vertical-align:middle;">사업자등록번호</th>
+            <td style="border:1px solid #000; padding:5px; width:25%; text-align:center; vertical-align:middle;">&nbsp;</td>
         </tr>
         <tr>
-            <th style="border:1px solid #000; background:#FFF; padding:5px;">소재지</th>
-            <td colspan="3" style="border:1px solid #000; padding:5px;">&nbsp;</td>
+            <th style="border:1px solid #000; background:#FFF; padding:5px; text-align:center; vertical-align:middle;">소재지</th>
+            <td colspan="3" style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">&nbsp;</td>
         </tr>
     </table>
     <div style="font-size:12px; font-weight:700; margin:6px 0 3px 0;">● 기부내용</div>
     <table class="receipt-table" style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:11px; background:#FFF;">
         <tr>
-            <th rowspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:9%;">코드</th>
-            <th rowspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:13%;">구분<br>(금전 또는 현물)</th>
-            <th rowspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:15%;">연월일</th>
-            <th colspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:43%;">내 &nbsp;&nbsp;&nbsp;&nbsp; 용</th>
-            <th rowspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:20%;">금액</th>
+            <th rowspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:9%; text-align:center; vertical-align:middle;">코드</th>
+            <th rowspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:13%; text-align:center; vertical-align:middle;">구분<br>(금전 또는 현물)</th>
+            <th rowspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:15%; text-align:center; vertical-align:middle;">연월일</th>
+            <th colspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:43%; text-align:center; vertical-align:middle;">내 &nbsp;&nbsp;&nbsp;&nbsp; 용</th>
+            <th rowspan="2" style="border:1px solid #000; background:#FFF; padding:4px; width:20%; text-align:center; vertical-align:middle;">금액</th>
         </tr>
         <tr>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%;">품명</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%;">내용</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">품명</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">내용</th>
         </tr>
         <tr>
-            <th colspan="3" style="border:1px solid #000; background:#FFF; padding:4px;">합 계 금 액</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px;">수량</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px;">단가</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px;">금액</th>
+            <th colspan="3" style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">합 계 금 액</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">수량</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">단가</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">금액</th>
         </tr>
         {donation_rows_html}
         <tr>
-            <th colspan="5" style="border:1px solid #000; background:#FFF; padding:6px; font-weight:700;">합 계 금 액</th>
-            <td style="border:1px solid #000; padding:6px; text-align:right; font-weight:800; font-size:12px;">{int(total_donor_amt):,}</td>
+            <th colspan="5" style="border:1px solid #000; background:#FFF; padding:6px; font-weight:700; text-align:center; vertical-align:middle;">합 계 금 액</th>
+            <td style="border:1px solid #000; padding:6px; text-align:right; font-weight:800; font-size:12px; vertical-align:middle;">{int(total_donor_amt):,}</td>
         </tr>
     </table>
     <div style="font-size:10.5px; margin-top:8px; text-align:justify; line-height:1.4;">
@@ -1525,7 +1526,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                 use_container_width=True
             )
         else:
-            st.info(f"{current_year} 회계연도에 등록된 기부금 수입 내역이 없습니다.")
+            st.info(f"{current_year} 회계연도에 등록된 기부금 수입 대장에 반영될 내역이 없습니다.")
 
     # ==========================================
     # TAB 4: ⚙️ 환경설정
@@ -1849,7 +1850,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                 </div>
                 """, unsafe_allow_html=True)
 
-                # [요청 반영] 생성목록에 예산과목(지정기부금/일반기부금) 컬럼 표시
                 disp_p_df = filtered_pledges[['donor_name', 'donor_category', 'payment_method', 'budget_subject', 'monthly_amt', 'default_purpose', 'id_number_masked']].copy()
                 disp_p_df.columns = ['기부자명', '기부자 구분', '기부방식', '예산과목', f'{chosen_month}월공제액(원)', '사용용도', '식별번호']
                 st.dataframe(
@@ -2391,6 +2391,8 @@ elif st.session_state.current_page == "AUDIT":
             "매칭유형": st.column_config.TextColumn("유형", width=75, disabled=True)
         }
     )
+    if st.button("💾 표에서 변경한 매칭 일괄 영구 저장", type="previous", use_container_width=True): # fixed
+        pass
     if st.button("💾 표에서 변경한 매칭 일괄 영구 저장", type="primary", use_container_width=True):
         b_save = {}
         for _, row in edited_df.iterrows():
