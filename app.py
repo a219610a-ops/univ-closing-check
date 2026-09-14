@@ -971,7 +971,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                 }
             )
 
-            # [요청 반영] 기부금 수입 대장 및 관리 엑셀 다운로드 기능 추가
+            # 수입대장 엑셀 다운로드 버튼 추가
             buf_ledger = io.BytesIO()
             with pd.ExcelWriter(buf_ledger, engine='openpyxl') as writer:
                 summary_table_df.drop(columns=['수입ID']).to_excel(writer, index=False, sheet_name=f"{current_year}년_기부금수입대장")
@@ -1093,7 +1093,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             st.info(f"{current_year} 회계연도에 등록된 기부금 수입이 없습니다. 상단에서 기부금을 먼저 등록해 주세요.")
 
     # ==========================================
-    # TAB 2: 📊 사용 용도별 집행 정산표 (예산과목 구분 맨 앞 추가)
+    # TAB 2: 📊 사용 용도별 집행 정산표 (예산과목 맨 앞 추가)
     # ==========================================
     with tab_stmt:
         st.markdown(f"#### 📊 [{current_year} 회계연도] 사용 용도별 집행 정산표")
@@ -1469,12 +1469,6 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         <tr>
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">품명</th>
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">내용</th>
-        </tr>
-        <tr>
-            <th colspan="3" style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">합 계 금 액</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">수량</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">단가</th>
-            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">금액</th>
         </tr>
         {donation_rows_html}
         <tr>
