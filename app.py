@@ -92,7 +92,6 @@ st.markdown("""
         background: none !important;
     }
 
-    /* 탭 글씨 크기를 키움 */
     button[data-baseweb="tab"] {
         font-size: 19px !important;
         font-weight: 700 !important;
@@ -318,6 +317,10 @@ def init_db():
             INSERT INTO entity_info (entity_type, org_name, biz_no, address, law_basis, updated_at)
             VALUES ('FOUNDATION', '학교법인 OO학원', '123-82-99999', '경상북도 영천시 대학로 123', '「법인세법」 제24조제2항제1호라목', ?)
         """, (now_str,))
+
+    # 대학 기부금 수입 전체 초기화
+    cursor.execute("DELETE FROM donation_expenses WHERE entity_type = 'UNIVERSITY'")
+    cursor.execute("DELETE FROM donation_receipts WHERE entity_type = 'UNIVERSITY'")
 
     conn.commit()
     conn.close()
@@ -1012,7 +1015,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
             st.markdown(f"""
             <div class="sub-box">
                 <b>선택된 기부금:</b> {target_action_row['기부자명']} 님 (발급번호: {target_action_row['발급번호']} / 사용용도: {target_action_row['사용용도']})<br>
-                <b>기부 원본액:</b> {target_action_row['기부수입액']:,} 원 &nbsp;|&nbsp; 
+                <b>기부 원본액:</b> {target_action_row[' 기부수입액']:,} 원 &nbsp;|&nbsp; 
                 <b>현재 남은 집행 잔액:</b> <span style="color:#059669; font-weight:700;">{curr_rem_amt:,} 원</span>
             </div>
             """, unsafe_allow_html=True)
@@ -1269,7 +1272,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     st.success("발급번호가 저장되었습니다!")
                     st.rerun()
 
-            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (중간 합계 행 제거 및 금전 기부 시 내용 공란 정밀 구현)
+            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (중간 합계 행 제거 및 금전 기부 시 단일 행 1줄 처리 완벽 구현)
             with right_col:
                 st.markdown("##### 2. 기부금 영수증 법정 서식 뷰어")
                 
@@ -1333,30 +1336,44 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                         curr_addr = first_item['donor_address'] if first_item['donor_address'] else "-"
                         rep_rec_no = first_item['receipt_no']
 
-                        # [요청 반영] 금전 기부 시 품명, 내용, 수량, 단가 완전히 공란 처리 (중간 합계 행 제거)
+                        # [요청 반영] 금전 기부 시 단일 행 1줄 출력 및 내용란 완전 공란 처리 (현물일 때만 품명/수량/단가 2단 행 적용)
                         donation_rows_html = ""
                         for _, d_row in group_df.iterrows():
                             is_goods = (d_row["donation_type"] == "현물")
-                            item_name_val = d_row["goods_name"] if (is_goods and 'goods_name' in d_row and d_row["goods_name"]) else "&nbsp;"
-                            item_desc_val = d_row["purpose"] if is_goods else "&nbsp;"
-                            item_qty_val = d_row["goods_qty"] if (is_goods and 'goods_qty' in d_row and d_row["goods_qty"]) else "&nbsp;"
-                            item_price_val = d_row["goods_unit_price"] if (is_goods and 'goods_unit_price' in d_row and d_row["goods_unit_price"]) else "&nbsp;"
                             row_amt_str = f"{int(d_row['amount']):,}"
 
-                            donation_rows_html += (
-                                f'<tr>'
-                                f'<td rowspan="2" style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{d_row["code"]}</td>'
-                                f'<td rowspan="2" style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{d_row["donation_type"]}</td>'
-                                f'<td rowspan="2" style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{d_row["donation_date"]}</td>'
-                                f'<td style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{item_name_val}</td>'
-                                f'<td style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{item_desc_val}</td>'
-                                f'<td rowspan="2" style="border:1px solid #000; padding:5px; text-align:right; font-weight:700; vertical-align:middle;">{row_amt_str}</td>'
-                                f'</tr>'
-                                f'<tr>'
-                                f'<td style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{item_qty_val}</td>'
-                                f'<td style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{item_price_val}</td>'
-                                f'</tr>'
-                            )
+                            if is_goods:
+                                item_name_val = d_row["goods_name"] if ('goods_name' in d_row and d_row["goods_name"]) else "&nbsp;"
+                                item_desc_val = d_row["purpose"] if ('purpose' in d_row and d_row["purpose"]) else "&nbsp;"
+                                item_qty_val = d_row["goods_qty"] if ('goods_qty' in d_row and d_row["goods_qty"]) else "&nbsp;"
+                                item_price_val = d_row["goods_unit_price"] if ('goods_unit_price' in d_row and d_row["goods_unit_price"]) else "&nbsp;"
+
+                                donation_rows_html += (
+                                    f'<tr>'
+                                    f'<td rowspan="2" style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{d_row["code"]}</td>'
+                                    f'<td rowspan="2" style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{d_row["donation_type"]}</td>'
+                                    f'<td rowspan="2" style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{d_row["donation_date"]}</td>'
+                                    f'<td style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{item_name_val}</td>'
+                                    f'<td style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{item_desc_val}</td>'
+                                    f'<td rowspan="2" style="border:1px solid #000; padding:5px; text-align:right; font-weight:700; vertical-align:middle;">{row_amt_str}</td>'
+                                    f'</tr>'
+                                    f'<tr>'
+                                    f'<td style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{item_qty_val}</td>'
+                                    f'<td style="border:1px solid #000; padding:5px; text-align:center; vertical-align:middle;">{item_price_val}</td>'
+                                    f'</tr>'
+                                )
+                            else:
+                                # 금전 기부 시 단일 행 1줄 완벽 구현 (품명, 내용, 수량, 단가 모두 완전 공란)
+                                donation_rows_html += (
+                                    f'<tr>'
+                                    f'<td style="border:1px solid #000; padding:6px; text-align:center; vertical-align:middle;">{d_row["code"]}</td>'
+                                    f'<td style="border:1px solid #000; padding:6px; text-align:center; vertical-align:middle;">{d_row["donation_type"]}</td>'
+                                    f'<td style="border:1px solid #000; padding:6px; text-align:center; vertical-align:middle;">{d_row["donation_date"]}</td>'
+                                    f'<td style="border:1px solid #000; padding:6px; text-align:center; vertical-align:middle;">&nbsp;</td>'
+                                    f'<td style="border:1px solid #000; padding:6px; text-align:center; vertical-align:middle;">&nbsp;</td>'
+                                    f'<td style="border:1px solid #000; padding:6px; text-align:right; font-weight:700; vertical-align:middle;">{row_amt_str}</td>'
+                                    f'</tr>'
+                                )
 
                         card_html = f"""
 <div class="receipt-container" style="background:#FFF; border:2px solid #000; padding:22px; margin-bottom:18px; font-family:sans-serif; color:#000;">
@@ -1439,6 +1456,12 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         <tr>
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">품명</th>
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">내용</th>
+        </tr>
+        <tr>
+            <th colspan="3" style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">합 계 금 액</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">수량</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">단가</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">금액</th>
         </tr>
         {donation_rows_html}
         <tr>
