@@ -223,6 +223,7 @@ def init_db():
             budget_subject TEXT NOT NULL DEFAULT '일반기부금',
             major_category TEXT NOT NULL DEFAULT '',
             sub_category TEXT NOT NULL DEFAULT '',
+            default_purpose TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT '진행중',
             created_at TEXT NOT NULL
         )
@@ -259,7 +260,7 @@ def init_db():
 
     cursor.execute("PRAGMA table_info(donation_pledges)")
     pl_cols = [c[1] for c in cursor.fetchall()]
-    for col, default_val in [("budget_subject", "일반기부금"), ("major_category", ""), ("sub_category", "")]:
+    for col, default_val in [("budget_subject", "일반기부금"), ("major_category", ""), ("sub_category", ""), ("default_purpose", "")]:
         if col not in pl_cols:
             try: cursor.execute(f"ALTER TABLE donation_pledges ADD COLUMN {col} DEFAULT '{default_val}'")
             except Exception: pass
@@ -1267,7 +1268,7 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
                     st.success("발급번호가 저장되었습니다!")
                     st.rerun()
 
-            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어 (중간 합계 행 없음, 현물 품명/수량/단가 및 금전 1줄 공란 완벽 반영)
+            # 우측: 법인세법 시행규칙 [별지 제63호의3서식] 뷰어
             with right_col:
                 st.markdown("##### 2. 기부금 영수증 법정 서식 뷰어")
                 
@@ -1449,6 +1450,12 @@ elif st.session_state.current_page == "DONATION_WORKSPACE":
         <tr>
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">품명</th>
             <th style="border:1px solid #000; background:#FFF; padding:4px; width:21.5%; text-align:center; vertical-align:middle;">내용</th>
+        </tr>
+        <tr>
+            <th colspan="3" style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">합 계 금 액</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">수량</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">단가</th>
+            <th style="border:1px solid #000; background:#FFF; padding:4px; text-align:center; vertical-align:middle;">금액</th>
         </tr>
         {donation_rows_html}
         <tr>
